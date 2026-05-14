@@ -1,0 +1,21 @@
+core/.gitignore
+  s_3ac64368b6b350::t_76109227edaa30 8
+core/Makefile
+  s_3ac64368b6b350::t_0f1ab4497d6be2 105
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "355e1cd277cd3c0cce569707ca72eb4bb36e83e8",
+  "prompts": {},
+  "sessions": {
+    "s_3ac64368b6b350": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f72c2aa-4f1e-4680-9b3b-9f9423c9e488",
+        "model": "unknown"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
