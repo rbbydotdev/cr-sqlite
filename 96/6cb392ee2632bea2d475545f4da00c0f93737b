@@ -1,0 +1,39 @@
+tests/smoke/probe_perf_insertion_scaling.mjs
+  s_3ac64368b6b350::t_80be98338232e0 1-86
+core/rs/text-crdt-fugue/src/registration.rs
+  s_3ac64368b6b350::t_b46df44e488ff6 132,138
+  s_3ac64368b6b350::t_b6eb0cf378ba91 215-282
+tests/smoke/probe_99_large_document.mjs
+  s_3ac64368b6b350::t_c26e68a6788743 1-195
+core/rs/text-crdt-fugue/src/cache.rs
+  s_3ac64368b6b350::t_8ad8cc9a4790b9 122-136,139-140,142-148,152-155
+  s_3ac64368b6b350::t_0c0d33a95c93d0 1-121
+  s_3ac64368b6b350::t_310c77086e1d37 137-138,141,149-151
+core/rs/text-crdt-fugue/src/insertion.rs
+  s_3ac64368b6b350::t_941da56d13d5cd 53-59,67,69,75-76,85-94
+  s_3ac64368b6b350::t_c24580b1acacc7 105-108,111-112,136-154
+  s_3ac64368b6b350::t_94bcc2f7b4fe54 79
+  s_3ac64368b6b350::t_033e0bff2d685c 50-52,61-66,68,70-74,77-78,80-81,102-104,109-110,113-135,155-169
+core/rs/text-crdt-fugue/src/deletion.rs
+  s_3ac64368b6b350::t_9db2f63f8ddd91 451-458
+  s_3ac64368b6b350::t_8f2ff2b3e3b3d8 261-355
+core/rs/text-crdt-fugue/src/lib.rs
+  s_3ac64368b6b350::t_7bb59de2ecd968 79-84,89,102
+  s_3ac64368b6b350::t_1ed93993b82df5 8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "966cb392ee2632bea2d475545f4da00c0f93737b",
+  "prompts": {},
+  "sessions": {
+    "s_3ac64368b6b350": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f72c2aa-4f1e-4680-9b3b-9f9423c9e488",
+        "model": "unknown"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
