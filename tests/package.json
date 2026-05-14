@@ -1,0 +1,21 @@
+{
+  "name": "sqlite-crdt-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "smoke": "node smoke/sync-two-nodes.mjs",
+    "smoke:wasm": "node smoke/sync-two-nodes-wasm.mjs"
+  },
+  "dependencies": {
+    "@vlcn.io/crsqlite-wasm": "^0.16.0",
+    "better-sqlite3": "^12.4.1"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3"
+    ]
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5"
+  }
+}
