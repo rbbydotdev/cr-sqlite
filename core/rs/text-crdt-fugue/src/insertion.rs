@@ -59,38 +59,68 @@ pub fn fugue_insert(
 
     let result = crate::active::with_active(db, || {
         if let Some(cache) = unsafe { crate::cache::cache_from_user_data(user_data) } {
-            if let Some(entry) = cache.get(&backing, row_pk) {
+            if let Some(mut doc) = cache.get_doc(&backing, row_pk) {
                 let current_version = crate::cache::read_version(db, &backing, row_pk)
                     .map_err(|_| String::from("cache: read_version"))?;
-                // Fast path: the caller is inserting at the position
-                // *immediately after* our cached cursor marker. Covers both
-                // append-at-tail (cursor IS the tail) and sequential typing
-                // mid-content (cursor sits wherever the user typed last).
-                if current_version == entry.backing_version
-                    && position == entry.cursor_view_position + 1
-                {
+                if current_version != doc.backing_version {
+                    // External write (sync apply, manual SQL) shifted the
+                    // tree out from under us. Drop all markers — adjusting
+                    // them across an unknown batch is too error-prone.
+                    cache.invalidate(&backing, row_pk);
+                } else if let Some((hit_id, hit_idx, hit_pos)) = doc.try_fast_path(position) {
+                    // Marker hit: a previous insert at view_position `hit_pos`
+                    // has a marker. New insert at `hit_pos + 1` attaches as
+                    // its child. The just-mutated `doc` (try_fast_path bumped
+                    // last_used) needs to be stored back; apply_fast_path_hit
+                    // mutates the same struct and we save it after the write.
+                    let view_length_before = doc.view_length;
                     let n = perform_append_fast_path(
-                        db, table, column, &backing, row_pk, text, &entry, cache,
+                        db,
+                        table,
+                        column,
+                        &backing,
+                        row_pk,
+                        text,
+                        &hit_id,
+                        hit_idx,
+                        hit_pos,
+                        view_length_before,
                     )?;
+                    // Re-read version (the insert bumped it via triggers).
+                    let new_version = crate::cache::read_version(db, &backing, row_pk)
+                        .map_err(|_| String::from("cache: read_version post-fast"))?;
+                    let new_idx = (text.chars().count() as i32) - 1;
+                    // We need the just-inserted node's item_id; perform_append_fast_path
+                    // generated it but doesn't return it. Re-fetch by querying the row
+                    // we just wrote. Inelegant but avoids restructuring the call signature.
+                    // Actually simpler: have perform_append_fast_path return it.
+                    let new_item_id = n.1;
+                    doc.apply_fast_path_hit(
+                        hit_pos,
+                        new_item_id,
+                        new_idx,
+                        text.chars().count() as i32,
+                        new_version,
+                    );
+                    cache.set_doc(&backing, row_pk, doc);
                     fast_path_taken = true;
-                    return Ok(n);
+                    return Ok(n.0);
                 }
             }
         }
 
-        // Slow path. After it finishes, refresh the cache with the cursor
-        // pointing at the *last inserted char* (view position
-        // position + len(text) - 1) so subsequent sequential typing at that
-        // spot hits the fast path.
+        // Slow path. After it finishes, refresh the cache: keeps existing
+        // markers (shifted appropriately) and adds a new one at the insert
+        // position so subsequent sequential typing here fast-paths.
         let n = perform_insert(db, table, column, row_pk, position, text)?;
         if let Some(cache) = unsafe { crate::cache::cache_from_user_data(user_data) } {
-            let target_view_pos = position + (text.chars().count() as i32) - 1;
-            crate::cache::refresh_from_db(
+            crate::cache::refresh_after_slow_path(
                 db,
                 &backing,
                 row_pk,
                 cache,
-                Some(target_view_pos),
+                position,
+                text.chars().count() as i32,
             )?;
         }
         Ok(n)
@@ -114,21 +144,19 @@ pub fn fugue_insert(
     }
 }
 
-/// Structural fast path. The cache's cursor marker tells us where the
-/// previous insert landed; the caller has already verified `position ==
-/// cursor_view_position + 1` AND the backing-version snapshot matches.
-/// We attach the new node directly to the cursor (O(1) write — no tree
-/// walk) and update the materialised parent column via a SQL string
-/// operation:
+/// Structural fast path: a cache marker matched the target position, so we
+/// know the parent (item_id, original_idx) without walking the tree.
+/// Inserts the new node and updates the materialised `body` column in
+/// SQLite:
 ///
-/// - **Tail case** (`cursor_view_position == view_length - 1`, i.e.
-///   appending at the doc's end): `body = body || ?`. Amortised O(1).
-/// - **Mid-content case** (cursor sits inside the doc): `body =
-///   substr(body, 1, position) || ? || substr(body, position+1)`. O(N) in
-///   the body length but stays inside SQLite — no Rust render walk.
+/// - **Tail case** (`hit_pos + 1 == view_length_before`, i.e. appending at
+///   the doc's end): `body = body || ?` — amortised O(1).
+/// - **Mid-content case**: `body = substr(body, 1, n) || ? || substr(body,
+///   n+1)` — O(N) but stays inside SQLite, no Rust render walk.
 ///
-/// Both paths land at the correct final body; the split is just an
-/// optimisation for the common typing-at-tail case.
+/// Returns `(rows_written, new_item_id)` — the caller needs the new
+/// item_id to update the cache's marker to point at the just-inserted
+/// char (so the next call at the new cursor fast-paths).
 fn perform_append_fast_path(
     db: *mut sqlite3,
     table: &str,
@@ -136,14 +164,16 @@ fn perform_append_fast_path(
     backing: &str,
     row_pk: i64,
     text: &str,
-    entry: &crate::cache::AppendCacheEntry,
-    cache: &crate::cache::ConnCache,
-) -> Result<usize, String> {
+    hit_item_id: &str,
+    hit_original_idx: i32,
+    hit_view_pos: i32,
+    view_length_before: i32,
+) -> Result<(usize, String), String> {
     let new_item_id = fresh_item_id(db).map_err(|_| String::from("fast: fresh_item_id"))?;
     let new_text_len = text.chars().count() as i32;
     let new_idx = new_text_len - 1;
-    let insert_pos = entry.cursor_view_position + 1;
-    let at_tail = insert_pos == entry.view_length;
+    let insert_pos = hit_view_pos + 1;
+    let at_tail = insert_pos == view_length_before;
 
     insert_node(
         db,
@@ -152,8 +182,8 @@ fn perform_append_fast_path(
         &new_item_id,
         new_idx,
         Some(text),
-        &entry.tail_item_id,
-        entry.tail_original_idx,
+        hit_item_id,
+        hit_original_idx,
         /*or_ignore=*/ false,
     )
     .map_err(|_| String::from("fast: insert_node"))?;
@@ -203,24 +233,10 @@ fn perform_append_fast_path(
             .map_err(|_| String::from("fast: step mid splice"))?;
     }
 
-    let new_version =
-        crate::cache::read_version(db, backing, row_pk).unwrap_or(entry.backing_version + 1);
-
-    cache.set(
-        backing,
-        row_pk,
-        crate::cache::AppendCacheEntry {
-            backing_version: new_version,
-            tail_item_id: new_item_id,
-            tail_original_idx: new_idx,
-            // Cursor advances by the length of the inserted text — it now
-            // sits at the LAST inserted char. View length grows by the same.
-            cursor_view_position: entry.cursor_view_position + new_text_len,
-            view_length: entry.view_length + new_text_len,
-        },
-    );
-
-    Ok(1)
+    // Cache update happens at the call site so it can use apply_fast_path_hit
+    // (which knows about marker shifts). We return the new_item_id so the
+    // caller has it.
+    Ok((1, new_item_id))
 }
 
 /// (itemId, idx) — a node in the Fugue tree.
