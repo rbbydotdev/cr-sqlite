@@ -1,0 +1,20 @@
+README.md
+  s_3ac64368b6b350::t_6744b459cc38e7 10-11
+  s_3ac64368b6b350::t_c90bbc82f2a16f 80-81
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "cc18711a69f09f9522cec956453334f0a60ef29f",
+  "prompts": {},
+  "sessions": {
+    "s_3ac64368b6b350": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f72c2aa-4f1e-4680-9b3b-9f9423c9e488",
+        "model": "unknown"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
