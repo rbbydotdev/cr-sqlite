@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>fugue · collaborative text demo</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <h1>
+        fugue
+        <span>collaborative text · crdt demo</span>
+      </h1>
+      <div class="actions">
+        <span class="hint">type in either editor · toggle online to control sync</span>
+        <button class="btn" id="add-peer">+ editor</button>
+      </div>
+    </header>
+
+    <main id="peers" class="peers" aria-label="editors"></main>
+
+    <template id="peer-template">
+      <article class="peer" data-peer="?">
+        <header class="peer-head">
+          <span class="peer-stripe" aria-hidden="true"></span>
+          <h2 class="peer-name">editor —</h2>
+          <code class="peer-site">site:—</code>
+          <span class="peer-spacer"></span>
+          <label class="online-toggle" title="when offline, edits stay local and queue until reconnected">
+            <input class="online-cb" type="checkbox" checked />
+            <span class="online-label">online</span>
+          </label>
+          <span class="pending" hidden>0 pending</span>
+          <button class="btn-icon btn-close" title="remove editor" aria-label="remove editor">✕</button>
+        </header>
+
+        <div class="peer-editor">
+          <textarea class="editor" rows="6" placeholder="type here…" spellcheck="false"></textarea>
+        </div>
+
+        <details class="peer-rows">
+          <summary>
+            <span class="rows-label">backing rows</span>
+            <span class="rows-summary">(0)</span>
+          </summary>
+          <div class="rows-frame">
+            <table>
+              <thead>
+                <tr>
+                  <th class="c-item">itemId</th>
+                  <th class="c-idx">idx</th>
+                  <th class="c-content">content</th>
+                  <th class="c-parent">parent</th>
+                  <th class="c-flag" title="tombstoned">T</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </details>
+      </article>
+    </template>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

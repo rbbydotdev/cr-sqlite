@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>fugue · in-browser benchmarks</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./bench.css" />
+  </head>
+  <body class="bench-body">
+    <header class="bar">
+      <h1>
+        fugue · bench
+        <span>browser perf · β-flat / N-marker LRU · per-op ms</span>
+      </h1>
+      <div class="actions">
+        <a class="btn btn-ghost" href="./index.html">← demo</a>
+        <button class="btn btn-primary" id="run-btn" disabled>▶ run</button>
+      </div>
+    </header>
+
+    <main class="bench-main">
+      <section class="status-strip">
+        <span class="dot dot-pending" id="boot-dot"></span>
+        <span id="boot-msg">loading wasm…</span>
+        <span class="status-spacer"></span>
+        <span id="run-info" class="run-info"></span>
+      </section>
+
+      <section class="matrix-wrap">
+        <table class="matrix" id="matrix">
+          <thead>
+            <tr id="matrix-head"></tr>
+          </thead>
+          <tbody id="matrix-body"></tbody>
+        </table>
+      </section>
+
+      <footer class="legend">
+        <span class="leg-cell pass">▪ pass</span>
+        <span class="leg-cell soft">▪ soft (per-op &gt; soft limit)</span>
+        <span class="leg-cell fail">▪ fail (per-op &gt; hard limit)</span>
+        <span class="legend-spacer"></span>
+        <span class="legend-note">cells show per-op time in ms · column ratio vs first column at bottom</span>
+      </footer>
+    </main>
+
+    <script type="module" src="./bench.js"></script>
+  </body>
+</html>
