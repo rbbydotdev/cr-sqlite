@@ -170,6 +170,30 @@ fn perform_insert(
         }
     };
 
+    // Case 1 (Weidner): extend our own most-recent run in place instead of creating a new row.
+    // Allowed when ALL hold:
+    //   (a) we created the left neighbor's item (itemId starts with our site_id hex)
+    //   (b) the left neighbor is the rightmost row for its itemId (no peer split it)
+    //   (c) the left neighbor has no children (no concurrent insert sits past it)
+    // Effect: UPDATE existing row's content (append `text`) and bump idx by chars added.
+    // PK change is materially DELETE + INSERT in cr-sqlite's change log — fine because
+    // the precondition guarantees no children reference the old idx.
+    if let Some(l) = &left {
+        let site_hex =
+            current_site_hex(db).map_err(|_| String::from("failed to query crsql_site_id"))?;
+        let we_created = l.item_id.starts_with(&site_hex);
+        let is_rightmost = !nodes
+            .iter()
+            .any(|n| n.item_id == l.item_id && n.idx > l.idx);
+        let has_kids = nodes
+            .iter()
+            .any(|n| n.parent_item_id == l.item_id && n.parent_idx == l.idx);
+        if we_created && is_rightmost && !has_kids {
+            extend_run_in_place(db, &backing, row_pk, l, text)?;
+            return Ok(split_writes); // No new row beyond any split that already happened
+        }
+    }
+
     // Generate a fresh item_id for this insertion.
     let new_item_id = fresh_item_id(db).map_err(|_| String::from("failed to generate item_id"))?;
     // New idx = len(text) - 1 (Weidner: index is the LAST char strictly contained).
@@ -553,13 +577,54 @@ fn insert_node(
 }
 
 /// Generate a fresh item_id: hex(crsql_site_id()) prefix + random suffix.
-/// Site prefix lets future Case-1 extension recognize "our" items.
+/// Site prefix lets Case-1 extension recognize "our" items.
 ///
-/// #!~ Phase 6: tighten to {site}.{monotonic_counter} for ordering stability
+/// #!~ tighten to {site}.{monotonic_counter} for ordering stability
 fn fresh_item_id(db: *mut sqlite3) -> Result<String, ResultCode> {
     let stmt = db.prepare_v2(
         "SELECT lower(hex(crsql_site_id())) || '_' || lower(hex(randomblob(6)))",
     )?;
     stmt.step()?;
     Ok(String::from(stmt.column_text(0)?))
+}
+
+/// Hex-encoded crsql_site_id() — used as a prefix in itemId so Case 1 can detect
+/// "we created this item." Same encoding as fresh_item_id's prefix.
+fn current_site_hex(db: *mut sqlite3) -> Result<String, ResultCode> {
+    let stmt = db.prepare_v2("SELECT lower(hex(crsql_site_id()))")?;
+    stmt.step()?;
+    Ok(String::from(stmt.column_text(0)?))
+}
+
+/// Case 1 in-place extension: UPDATE existing row's content (concat `text`) and idx
+/// (bump by chars added). The row stays at the same parent, just covers a wider range.
+fn extend_run_in_place(
+    db: *mut sqlite3,
+    backing: &str,
+    row_pk: i64,
+    left: &NodeRef,
+    text: &str,
+) -> Result<(), String> {
+    let len_added = text.chars().count() as i32;
+    let new_idx = left.idx + len_added;
+    let sql = format!(
+        "UPDATE \"{}\" SET content = content || ?, idx = ? \
+         WHERE row_pk = ? AND itemId = ? AND idx = ?",
+        escape_ident(backing)
+    );
+    let stmt = db
+        .prepare_v2(&sql)
+        .map_err(|_| String::from("prepare case1 extend"))?;
+    stmt.bind_text(1, text, Destructor::TRANSIENT)
+        .map_err(|_| String::from("bind text"))?;
+    stmt.bind_int(2, new_idx)
+        .map_err(|_| String::from("bind new_idx"))?;
+    stmt.bind_int64(3, row_pk)
+        .map_err(|_| String::from("bind row_pk"))?;
+    stmt.bind_text(4, &left.item_id, Destructor::TRANSIENT)
+        .map_err(|_| String::from("bind itemId"))?;
+    stmt.bind_int(5, left.idx)
+        .map_err(|_| String::from("bind old idx"))?;
+    stmt.step().map_err(|_| String::from("case1 step"))?;
+    Ok(())
 }
