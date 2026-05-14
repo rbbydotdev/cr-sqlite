@@ -81,43 +81,53 @@ const idxExists = db
 if (idxExists.n !== 1) fail("parent index missing");
 console.log("ok: parent index exists");
 
-// 7. Default mode (defer): render trigger is NOT installed.
-//    Eager mode (opt-in) installs it. Verify both.
-const triggerCount = db
+// 7. Render trigger is installed in both modes; transparent mode has a WHEN suppression
+//    clause that skips renders while a fugue_* function is mid-flight.
+const trigger = db
   .prepare(
-    "SELECT count(*) AS n FROM sqlite_master WHERE type='trigger' AND name='__crsql_fugue_notes_body__render_ai'",
+    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='__crsql_fugue_notes_body__render_ai'",
   )
-  .get().n;
-if (triggerCount !== 0) fail(`expected 0 render triggers in defer mode, got ${triggerCount}`);
-console.log("ok: defer mode has no render trigger");
+  .get();
+if (!trigger) fail("expected render trigger to exist in transparent mode");
+if (!trigger.sql.includes("WHEN") || !trigger.sql.includes("__crsql_fugue_active"))
+  fail(`transparent-mode trigger missing WHEN suppression clause:\n${trigger.sql}`);
+console.log("ok: transparent-mode trigger installed with suppression WHEN clause");
 
-// Verify eager mode installs the trigger.
+// Verify eager mode installs the trigger WITHOUT the WHEN clause.
 db.exec("CREATE TABLE eager_notes (id INTEGER PRIMARY KEY NOT NULL, body TEXT)");
 db.prepare("SELECT crsql_as_crr('eager_notes')").get();
 db.prepare("SELECT crsql_as_text_crdt('eager_notes', 'body', 1)").get();
 const eagerTrigger = db
   .prepare(
-    "SELECT count(*) AS n FROM sqlite_master WHERE type='trigger' AND name='__crsql_fugue_eager_notes_body__render_ai'",
+    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='__crsql_fugue_eager_notes_body__render_ai'",
   )
+  .get();
+if (!eagerTrigger) fail("expected eager-mode trigger");
+if (eagerTrigger.sql.includes("WHEN"))
+  fail(`eager-mode trigger should NOT have WHEN clause:\n${eagerTrigger.sql}`);
+console.log("ok: eager-mode trigger installed without suppression");
+
+// Active-counter helper table exists (idempotent across registrations).
+const activeTable = db
+  .prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='__crsql_fugue_active'")
   .get().n;
-if (eagerTrigger !== 1) fail(`expected 1 render trigger in eager mode, got ${eagerTrigger}`);
-console.log("ok: eager mode installs render trigger");
+if (activeTable !== 1) fail("expected __crsql_fugue_active helper table");
+console.log("ok: __crsql_fugue_active helper table exists");
 
 // 8. Idempotent — second call is a no-op (no error)
 db.prepare("SELECT crsql_as_text_crdt('notes', 'body')").get();
 console.log("ok: idempotent");
 
-// 9. Manual insert into backing + crsql_fugue_flush populates notes.body (defer-mode path).
+// 9. Manual INSERT into backing fires the transparent-mode trigger (counter=0),
+//    which auto-renders notes.body. No flush needed.
 db.exec("INSERT INTO notes (id, title, body) VALUES (1, 't', '')");
 db.prepare(
   `INSERT INTO __crsql_fugue_notes_body (row_pk, itemId, idx, content, parentItemId, parentIdx, tombstoned)
    VALUES (1, 'Alice', 4, 'Hey ', '', -2, 0)`,
 ).run();
-// In defer mode, manual INSERTs don't trigger a render. Flush explicitly.
-db.prepare("SELECT crsql_fugue_flush('notes','body',1)").get();
 const row = db.prepare("SELECT body FROM notes WHERE id = 1").get();
 if (row.body !== "Hey ")
-  fail(`flush wrong: got ${JSON.stringify(row.body)} expected 'Hey '`);
-console.log("ok: crsql_fugue_flush materializes 'Hey '");
+  fail(`auto-render wrong: got ${JSON.stringify(row.body)} expected 'Hey '`);
+console.log("ok: transparent-mode trigger auto-renders on manual INSERT (sync-apply path)");
 
-console.log("\nPASS: Phase 1 registration verified");
+console.log("\nPASS: Phase 1 registration verified (transparent mode)");

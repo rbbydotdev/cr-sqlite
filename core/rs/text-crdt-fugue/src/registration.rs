@@ -110,18 +110,89 @@ fn register(db: *mut sqlite3, table: &str, column: &str, eager: bool) -> Result<
     db.exec_safe(&as_crr)
         .map_err(|_| format!("failed to mark {} as CRR", backing))?;
 
-    // 5. render strategy:
-    //    eager=1 → AFTER INSERT/UPDATE/DELETE triggers re-render on every row mutation
-    //    eager=0 (default, defer) → no per-row triggers; fugue_insert/delete/cleanup each
-    //      call render::rerender_parent_column once at function end. Sync-apply paths
-    //      that bypass fugue_* (e.g. INSERT INTO crsql_changes) leave the materialized
-    //      parent column stale until the next fugue_* call OR explicit crsql_fugue_flush.
-    //    #!~ commit-hook auto-flush — eliminates the "sync-apply leaves body stale" gap
-    //      without needing manual flush. Future optimization.
-    if eager {
-        install_render_trigger(db, &backing, table, column)?;
-    }
+    // 5. render strategy (transparent mode by default):
+    //    Default → AFTER INSERT/UPDATE/DELETE triggers WITH `WHEN active_counter=0` clause.
+    //      Sync-apply paths (cr-sqlite writing remote changes through crsql_changes):
+    //        counter=0 → trigger fires → parent column auto-renders. No client work.
+    //      Local fugue_*  paths (insertion/deletion/cleanup):
+    //        function brackets its work with counter++/--. During its writes counter≥1
+    //        so the per-row trigger fires-but-skips. At end-of-function the explicit
+    //        rerender_parent_column call renders once. N-row writes → 1 render.
+    //    eager=1 (opt-in legacy): triggers installed WITHOUT the WHEN clause, so they
+    //      ALWAYS fire (no suppression). Slower for multi-row fugue calls (N triggers
+    //      + 1 explicit rerender), kept for callers who explicitly want eager-everywhere
+    //      semantics or for diagnostic comparison.
+    //    #!~ commit-hook integration could batch the explicit rerenders across
+    //      transactions (one render per row_pk per tx instead of one per fugue call).
+    ensure_active_counter_table(db)?;
+    install_render_trigger(db, &backing, table, column, eager)?;
 
+    // 6. UNTRACK the parent column at the cr-sqlite layer.
+    //    notes.body is a materialized view of the Fugue backing rows. cr-sqlite's
+    //    per-cell LWW would otherwise ship the body value to peers, where it can
+    //    win over the receiving peer's freshly-rendered body (e.g. when site_id or
+    //    lexicographic value tiebreaks go the wrong way under concurrent edits).
+    //    Block body from `{parent}__crsql_clock` so it never enters the change log.
+    //    Each peer's body stays as a purely local materialized view of its own
+    //    backing rows — which converge across peers via Fugue, not via LWW on body.
+    install_clock_untrack(db, table, column)?;
+
+    Ok(())
+}
+
+/// Prevent the parent column from being tracked in `{parent_table}__crsql_clock`.
+/// Removes any existing clock entries for the column and installs a BEFORE INSERT
+/// trigger that ignores future inserts. Body changes propagate via the backing
+/// table (which IS a CRR); the materialized parent column is purely local.
+fn install_clock_untrack(
+    db: *mut sqlite3,
+    parent_table: &str,
+    parent_column: &str,
+) -> Result<(), String> {
+    let clock = format!("{}__crsql_clock", parent_table);
+    let clock_esc = escape_ident(&clock);
+    let col_lit = parent_column.replace('\'', "''");
+
+    // Purge any existing tracked entries from before crsql_as_text_crdt was called.
+    let purge = format!(
+        "DELETE FROM \"{}\" WHERE col_name = '{}'",
+        clock_esc, col_lit
+    );
+    db.exec_safe(&purge)
+        .map_err(|_| format!("failed to purge clock entries for {}", parent_column))?;
+
+    // Block future tracking inserts via BEFORE INSERT + RAISE(IGNORE).
+    let trig_name = format!("__crsql_fugue_untrack_{}_{}", parent_table, parent_column);
+    let sql = format!(
+        "CREATE TRIGGER IF NOT EXISTS \"{trig}\" \
+         BEFORE INSERT ON \"{clock}\" \
+         FOR EACH ROW WHEN NEW.col_name = '{col}' BEGIN \
+            SELECT RAISE(IGNORE); \
+         END",
+        trig = escape_ident(&trig_name),
+        clock = clock_esc,
+        col = col_lit
+    );
+    db.exec_safe(&sql)
+        .map_err(|_| format!("failed to install untrack trigger on {}", clock))?;
+    Ok(())
+}
+
+/// Idempotent: creates the suppression-counter helper used by transparent-mode triggers.
+/// One row, `counter` defaults to 0. fugue_* functions bump it during their work.
+///
+/// Stored as a regular (non-temp) table because SQLite triggers on regular tables
+/// cannot reference temp tables in their WHEN clauses. The cost is one extra table in
+/// the schema; the row is never synced (not a CRR).
+fn ensure_active_counter_table(db: *mut sqlite3) -> Result<(), String> {
+    db.exec_safe(
+        "CREATE TABLE IF NOT EXISTS __crsql_fugue_active (\
+            id INTEGER PRIMARY KEY CHECK (id = 1),\
+            counter INTEGER NOT NULL DEFAULT 0\
+        );\
+        INSERT OR IGNORE INTO __crsql_fugue_active (id, counter) VALUES (1, 0);",
+    )
+    .map_err(|_| String::from("failed to create __crsql_fugue_active"))?;
     Ok(())
 }
 
@@ -153,13 +224,13 @@ fn install_render_trigger(
     backing: &str,
     parent_table: &str,
     parent_column: &str,
+    eager: bool,
 ) -> Result<(), String> {
     let backing_esc = escape_ident(backing);
     let parent_esc = escape_ident(parent_table);
     let col_esc = escape_ident(parent_column);
 
     // Render filter: include if not a sentinel (idx != -1) AND not tombstoned.
-    // The recursive CTE projects the tombstoned column up so the SELECT can filter it.
     let render_body = format!(
         "UPDATE \"{parent}\" SET \"{col}\" = (\
             WITH RECURSIVE under_node(content, level, itemId, idx, tombstoned) AS (\
@@ -180,31 +251,43 @@ fn install_render_trigger(
         backing = backing_esc
     );
 
-    // AFTER INSERT — also fires when cr-sqlite's apply inserts via crsql_changes
+    // Transparent mode (default): WHEN suppression clause skips the render while a
+    // fugue_* function is executing (counter>0). Sync-apply paths leave counter=0,
+    // so the trigger renders normally — no client responsibility for flushing.
+    //
+    // Eager mode (opt-in via 3rd arg): no WHEN clause, trigger always fires. Useful
+    // when callers want every backing-row mutation to render unconditionally.
+    let when_clause = if eager {
+        String::new()
+    } else {
+        String::from(" WHEN (SELECT counter FROM __crsql_fugue_active WHERE id=1) = 0")
+    };
+
     let trig_ai = format!(
         "CREATE TRIGGER IF NOT EXISTS \"{backing}__render_ai\" \
-         AFTER INSERT ON \"{backing}\" BEGIN {body}; END",
+         AFTER INSERT ON \"{backing}\"{when} BEGIN {body}; END",
         backing = backing_esc,
+        when = when_clause,
         body = render_body.replace("ROW_PK_PARAM", "NEW.row_pk")
     );
     db.exec_safe(&trig_ai)
         .map_err(|_| format!("failed to install AFTER INSERT trigger on {}", backing))?;
 
-    // AFTER UPDATE — content/tombstone changes from local edits or sync
     let trig_au = format!(
         "CREATE TRIGGER IF NOT EXISTS \"{backing}__render_au\" \
-         AFTER UPDATE ON \"{backing}\" BEGIN {body}; END",
+         AFTER UPDATE ON \"{backing}\"{when} BEGIN {body}; END",
         backing = backing_esc,
+        when = when_clause,
         body = render_body.replace("ROW_PK_PARAM", "NEW.row_pk")
     );
     db.exec_safe(&trig_au)
         .map_err(|_| format!("failed to install AFTER UPDATE trigger on {}", backing))?;
 
-    // AFTER DELETE — completeness; cr-sqlite doesn't typically delete CRR rows, but defensive
     let trig_ad = format!(
         "CREATE TRIGGER IF NOT EXISTS \"{backing}__render_ad\" \
-         AFTER DELETE ON \"{backing}\" BEGIN {body}; END",
+         AFTER DELETE ON \"{backing}\"{when} BEGIN {body}; END",
         backing = backing_esc,
+        when = when_clause,
         body = render_body.replace("ROW_PK_PARAM", "OLD.row_pk")
     );
     db.exec_safe(&trig_ad)

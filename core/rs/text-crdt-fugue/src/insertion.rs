@@ -46,8 +46,19 @@ pub fn fugue_insert(
         return;
     }
 
-    match perform_insert(db, table, column, row_pk, position, text) {
-        Ok(n) => ctx.result_int(n as i32),
+    // Transparent mode: bump active counter so per-row render triggers suppress during
+    // perform_insert's writes, then explicitly rerender once after exit.
+    let result = crate::active::with_active(db, || {
+        perform_insert(db, table, column, row_pk, position, text)
+    });
+    match result {
+        Ok(n) => {
+            if let Err(msg) = crate::render::rerender_parent_column(db, table, column, row_pk) {
+                ctx.result_error(&msg);
+                return;
+            }
+            ctx.result_int(n as i32);
+        }
         Err(msg) => ctx.result_error(&msg),
     }
 }
@@ -272,11 +283,6 @@ fn perform_insert(
     )
     .map_err(|_| String::from("failed to insert new content row"))?;
     written += 1;
-
-    // Defer mode (default): per-row render triggers are not installed, so we render once
-    // at end of the function. Eager mode (opt-in): triggers have already kept body fresh
-    // during the inserts above; this final call is redundant but harmless.
-    crate::render::rerender_parent_column(db, table, column, row_pk)?;
 
     Ok(written + split_writes)
 }

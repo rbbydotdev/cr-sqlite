@@ -84,9 +84,10 @@ console.log("ok: defer + eager produce identical render after each op");
 console.log(`  final defer render = ${JSON.stringify(renderD(db))}`);
 console.log(`  final eager render = ${JSON.stringify(renderE(db))}`);
 
-// Now test the documented difference: bypass our function entry points by inserting
-// directly into the backing table. Eager mode: trigger fires, parent column updates.
-// Defer mode: parent column does NOT update until flush.
+// Both modes auto-render on manual INSERT into the backing table (sync-apply path).
+// Transparent (default): counter=0 → trigger WHEN clause passes → trigger fires.
+// Eager: trigger always fires (no WHEN suppression).
+// This is the key transparent-mode property: no client responsibility for flushing.
 db.prepare(
   `INSERT INTO __crsql_fugue_notes_body_defer (row_pk, itemId, idx, content, parentItemId, parentIdx, tombstoned)
    VALUES (1, 'manual', 0, 'X', '', -2, 0)`,
@@ -96,30 +97,20 @@ db.prepare(
    VALUES (1, 'manual', 0, 'X', '', -2, 0)`,
 ).run();
 
-// Eager: parent column reflects the insert immediately (trigger fired).
 const eagerAfterManual = matE(db);
 const eagerRenderAfterManual = renderE(db);
 if (eagerAfterManual !== eagerRenderAfterManual)
   fail(
     `eager materialized stale after manual insert: mat=${eagerAfterManual} render=${eagerRenderAfterManual}`,
   );
-console.log("ok: eager materialized fresh after manual INSERT (no trigger bypass)");
+console.log("ok: eager auto-renders on manual INSERT (sync-apply path)");
 
-// Defer: parent column is stale until flush.
 const deferAfterManual = matD(db);
 const deferRenderAfterManual = renderD(db);
-if (deferAfterManual === deferRenderAfterManual)
-  console.log(`note: defer happened to be fresh — possibly content was already correct`);
-else
-  console.log(
-    `ok: defer materialized stale after manual INSERT (mat=${JSON.stringify(deferAfterManual)}, render=${JSON.stringify(deferRenderAfterManual)})`,
+if (deferAfterManual !== deferRenderAfterManual)
+  fail(
+    `transparent mode failed sync-apply auto-render: mat=${JSON.stringify(deferAfterManual)} render=${JSON.stringify(deferRenderAfterManual)}`,
   );
-
-// Call flush to refresh the defer column.
-db.prepare("SELECT crsql_fugue_flush('notes','body_defer',1)").get();
-const deferAfterFlush = matD(db);
-if (deferAfterFlush !== deferRenderAfterManual)
-  fail(`defer flush did not catch up: mat=${deferAfterFlush} render=${deferRenderAfterManual}`);
-console.log("ok: crsql_fugue_flush refreshes defer-mode parent column");
+console.log("ok: transparent (default) auto-renders on manual INSERT (no client flush needed)");
 
 console.log("\nPASS: defer + eager modes verified equivalent");

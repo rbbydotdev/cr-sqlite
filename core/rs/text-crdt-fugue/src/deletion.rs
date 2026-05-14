@@ -41,8 +41,17 @@ pub fn fugue_delete(
         return;
     }
 
-    match perform_delete(db, table, column, row_pk, from, to) {
-        Ok(n) => ctx.result_int(n as i32),
+    let result = crate::active::with_active(db, || {
+        perform_delete(db, table, column, row_pk, from, to)
+    });
+    match result {
+        Ok(n) => {
+            if let Err(msg) = crate::render::rerender_parent_column(db, table, column, row_pk) {
+                ctx.result_error(&msg);
+                return;
+            }
+            ctx.result_int(n as i32);
+        }
         Err(msg) => ctx.result_error(&msg),
     }
 }
@@ -205,10 +214,6 @@ fn perform_delete(
             }
         }
     }
-
-    // Defer mode (default): no per-row triggers; we render once here at end-of-function.
-    // Eager mode: triggers already kept body fresh; this call is redundant but harmless.
-    crate::render::rerender_parent_column(db, table, column, row_pk)?;
 
     Ok(writes)
 }

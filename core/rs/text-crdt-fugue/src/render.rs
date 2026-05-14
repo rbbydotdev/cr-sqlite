@@ -7,12 +7,9 @@ use sqlite_nostd as sqlite;
 use crate::util::{backing_table_name, escape_ident};
 
 /// Force-recompute the parent column for a single row_pk from the Fugue backing rows.
-/// Used by fugue_insert/delete/cleanup at end-of-function (defer mode) and by
-/// crsql_fugue_flush for sync-apply paths that bypass our function entry points.
-///
-/// #!~ commit-hook integration: a future optimization would have a SQLite commit hook
-/// scan a dirty-row queue and rerender once per transaction across all peers' changes,
-/// removing the need for callers to invoke flush after sync. Marked deferred.
+/// Called by fugue_insert/delete/cleanup at end-of-function (after their writes,
+/// AFTER decrementing the active-counter so this render is itself trigger-suppressed
+/// only when callers exist) and by crsql_fugue_flush for explicit refresh paths.
 pub(crate) fn rerender_parent_column(
     db: *mut sqlite3,
     table: &str,

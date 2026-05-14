@@ -36,8 +36,17 @@ pub fn fugue_cleanup(
     let row_pk = arg_slice[2].int64();
     let db = ctx.db_handle();
 
-    match perform_cleanup(db, table, column, row_pk) {
-        Ok(n) => ctx.result_int(n as i32),
+    let result = crate::active::with_active(db, || {
+        perform_cleanup(db, table, column, row_pk)
+    });
+    match result {
+        Ok(n) => {
+            if let Err(msg) = crate::render::rerender_parent_column(db, table, column, row_pk) {
+                ctx.result_error(&msg);
+                return;
+            }
+            ctx.result_int(n as i32);
+        }
         Err(msg) => ctx.result_error(&msg),
     }
 }
@@ -131,11 +140,6 @@ fn perform_cleanup(
             }
         }
     }
-
-    // Defer mode (default): no triggers fired during the cleanup UPDATEs above; rerender
-    // the parent column once here. Eager mode: triggers already kept body fresh — redundant
-    // but cheap.
-    crate::render::rerender_parent_column(db, table, column, row_pk)?;
 
     Ok(updates)
 }
