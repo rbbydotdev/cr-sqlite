@@ -1,0 +1,44 @@
+core/rs/text-crdt-fugue/src/registration.rs
+  s_3ac64368b6b350::t_7a20708b9806d1 113-128,178-180,182,187-188,190-195
+  s_3ac64368b6b350::t_66f3231068de63 227,254-262,264-265,268,270,278,280,288,290
+  s_3ac64368b6b350::t_86336fd6346acb 181,183-186,189
+  s_3ac64368b6b350::t_9fe05014e8f212 263
+  s_3ac64368b6b350::t_1fc649a66c11bc 130-154,156-177
+core/rs/text-crdt-fugue/src/active.rs
+  s_3ac64368b6b350::t_8409023c7e0863 13,19
+  s_3ac64368b6b350::t_c2a1b22389b20b 1-12,14-18,20-37
+core/rs/text-crdt-fugue/src/deletion.rs
+  s_3ac64368b6b350::t_2673f4368d11d2 44-54
+tests/smoke/text-crdt-defer-vs-eager.mjs
+  s_3ac64368b6b350::t_d3e148620f9372 87-90,106,110-112,114
+core/rs/text-crdt-fugue/src/cleanup.rs
+  s_3ac64368b6b350::t_1f8e7457cdd682 39-49
+core/rs/text-crdt-fugue/src/insertion.rs
+  s_3ac64368b6b350::t_df9e66233efdb3 49-61
+tests/smoke/text-crdt-sync-no-flush.mjs
+  s_3ac64368b6b350::t_f9a959c2db13c3 1-116
+core/rs/text-crdt-fugue/src/render.rs
+  s_3ac64368b6b350::t_c549157ce16787 10-12
+core/rs/text-crdt-fugue/src/lib.rs
+  s_3ac64368b6b350::t_06618f7cd89b7b 7
+tests/smoke/text-crdt-phase1.mjs
+  s_3ac64368b6b350::t_f75913d3072d86 84-86,88,90-94,96,102,104-112,114-115
+  s_3ac64368b6b350::t_61be034b2b68c9 121-122,130-131
+  s_3ac64368b6b350::t_a769f38a602d57 133
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "e91eeb8c11eac29fa583fd698bdd09c5a123d87b",
+  "prompts": {},
+  "sessions": {
+    "s_3ac64368b6b350": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f72c2aa-4f1e-4680-9b3b-9f9423c9e488",
+        "model": "unknown"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
