@@ -102,6 +102,7 @@ $(dbg_prefix):
 clean:
 	rm -rf $(prefix)
 	rm -rf $(dbg_prefix)
+	rm -f test_leak_condition test_leak_condition-*
 	cd rs/bundle && cargo clean
 	cd rs/integration_check && cargo clean
 
