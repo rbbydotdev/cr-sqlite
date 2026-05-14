@@ -1,0 +1,41 @@
+core/rs/text-crdt-fugue/src/render.rs
+  s_3ac64368b6b350::t_f64013d683dfa5 124,126-129
+  s_3ac64368b6b350::t_342fbb924cbfdb 94-99,110-120,125
+core/rs/text-crdt-fugue/src/registration.rs
+  s_3ac64368b6b350::t_4636cb1e75972e 245-246
+  s_3ac64368b6b350::t_806ffc845b861d 380-382
+  s_3ac64368b6b350::t_125c572aa3c010 588
+  s_3ac64368b6b350::t_1173fa8a995387 490-493,495-506,510-520,524-538,541
+  s_3ac64368b6b350::t_859a2a131f00aa 521,539
+  s_3ac64368b6b350::t_b63c368b1b28b9 130-131
+  s_3ac64368b6b350::t_9793e243a43185 134-139
+  s_3ac64368b6b350::t_c2cb1110a6853f 494
+tests/smoke/text-crdt-fuzz.mjs
+  s_3ac64368b6b350::t_1e08281677b11f 278-281
+  s_3ac64368b6b350::t_89347b1c890d57 78-82
+  s_3ac64368b6b350::t_3b5efeb56cc860 239
+  s_3ac64368b6b350::t_4618e43949265f 209-224,235-238
+  s_3ac64368b6b350::t_8157de3bd78820 172-191
+  s_3ac64368b6b350::t_1d2a37bc0e3900 1-59,65-77,83-148,153-155,158-160,163-164,167-168,170-171,192-208,232-234,240-277,286,291-300
+  s_3ac64368b6b350::t_4c664acd52650f 60-64
+  s_3ac64368b6b350::t_acfe18085d5ba5 282-285
+  s_3ac64368b6b350::t_f1d602d96c791e 287-290
+  s_3ac64368b6b350::t_c7886c30ee97e6 225-231
+  s_3ac64368b6b350::t_994e096071b77c 149-152,156-157,161-162,165-166,169
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "f06909ea4e4cc881921f7f71feb6456a75d9b3c7",
+  "prompts": {},
+  "sessions": {
+    "s_3ac64368b6b350": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f72c2aa-4f1e-4680-9b3b-9f9423c9e488",
+        "model": "unknown"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
