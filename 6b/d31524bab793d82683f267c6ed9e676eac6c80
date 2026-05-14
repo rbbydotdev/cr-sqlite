@@ -1,0 +1,73 @@
+tests/smoke/text-crdt-phase7-sync.mjs
+  s_3ac64368b6b350::t_939ff6d0131fe0 95
+  s_3ac64368b6b350::t_3097b3b9d2cb7f 1-94,96-109
+core/rs/text-crdt-fugue/src/lib.rs
+  s_3ac64368b6b350::t_d070644411cea1 34-41
+  s_3ac64368b6b350::t_439a98fea407c4 11
+  s_3ac64368b6b350::t_f62210eaaa9845 97-109
+  s_3ac64368b6b350::t_7f8b01162a59dd 7
+  s_3ac64368b6b350::t_1c3b27eed6b86a 71-83
+  s_3ac64368b6b350::t_f4446c353536ea 26-33
+  s_3ac64368b6b350::t_137bb7c803d01f 84-96
+  s_3ac64368b6b350::t_c4cf873fe2e25b 42-49
+  s_3ac64368b6b350::t_57c7e15b0d765b 8
+  s_3ac64368b6b350::t_bcf91e40b0101c 1-6,9,12-25,50-70,110-111
+  s_3ac64368b6b350::t_84b6e7ed312a69 10
+core/rs/bundle/src/lib.rs
+  s_3ac64368b6b350::t_efbb9906f8fe45 64-68
+  s_3ac64368b6b350::t_b05282f4d8bfb6 14
+core/rs/text-crdt-fugue/src/util.rs
+  s_3ac64368b6b350::t_abd2de4bee554f 1-15
+core/rs/text-crdt-fugue/src/render.rs
+  s_3ac64368b6b350::t_272026e3b9d49a 1-73
+tests/smoke/text-crdt-phase6-perf.mjs
+  s_3ac64368b6b350::t_3c2729d166727c 1-97
+tests/smoke/text-crdt-phase2.mjs
+  s_3ac64368b6b350::t_92406a8dd55032 1-95
+core/rs/text-crdt-fugue/src/insertion.rs
+  s_3ac64368b6b350::t_bafbb85833674f 6-104,110,127-128,131,133-136,165-361
+  s_3ac64368b6b350::t_f462175b17a2ce 105-109,111-126,129-130,132
+  s_3ac64368b6b350::t_2e2c21902ad285 1-5
+  s_3ac64368b6b350::t_f17e4fc03137c2 137-164
+tests/smoke/text-crdt-phase1.mjs
+  s_3ac64368b6b350::t_11d5b44bdc0fac 1-107
+py/correctness/tests/test_fugue.py
+  s_3ac64368b6b350::t_2f97b95df28b7e 31-34
+  s_3ac64368b6b350::t_929f2e99c83b2d 1-30,35-181
+core/rs/text-crdt-fugue/src/registration.rs
+  s_3ac64368b6b350::t_7dd98315c6f850 140-149,151-154,156-185,187-189
+  s_3ac64368b6b350::t_79da45c079d717 4
+  s_3ac64368b6b350::t_707fba8d6e2571 1-3,7-17,19-21,23-139,150,155,186,190
+  s_3ac64368b6b350::t_b4d25b51e8905f 5-6,18,22,191
+docs/text-crdt-plan.md
+  s_3ac64368b6b350::t_c5591090084a93 196,198-241
+core/rs/text-crdt-fugue/src/deletion.rs
+  s_3ac64368b6b350::t_d696ae4ec5fdc4 1-409
+core/rs/bundle/Cargo.toml
+  s_3ac64368b6b350::t_bd632354e482c4 17
+  s_3ac64368b6b350::t_68aafa7200a109 34,40,46
+tests/smoke/text-crdt-phase3.mjs
+  s_3ac64368b6b350::t_a7e2033d81c931 1-72,74,77,80-96
+  s_3ac64368b6b350::t_05297760cb9836 73,75-76,78-79
+tests/smoke/text-crdt-phase4.mjs
+  s_3ac64368b6b350::t_86a4772242e2ea 1-151,184
+  s_3ac64368b6b350::t_597ce538aa3a4a 152-183,185-188
+core/rs/text-crdt-fugue/Cargo.toml
+  s_3ac64368b6b350::t_4f1819342553db 1-24
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "6bd31524bab793d82683f267c6ed9e676eac6c80",
+  "prompts": {},
+  "sessions": {
+    "s_3ac64368b6b350": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f72c2aa-4f1e-4680-9b3b-9f9423c9e488",
+        "model": "unknown"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
