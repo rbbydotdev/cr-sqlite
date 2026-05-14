@@ -1,0 +1,21 @@
+core/rs/text-crdt-fugue/src/registration.rs
+  s_3ac64368b6b350::t_412d5fcc0dfe58 139-145
+tests/smoke/text-crdt-fuzz.mjs
+  s_3ac64368b6b350::t_bd009444f9c252 167-171
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "db2bbd42adef95c084b192c47d9be4ceef66a62b",
+  "prompts": {},
+  "sessions": {
+    "s_3ac64368b6b350": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f72c2aa-4f1e-4680-9b3b-9f9423c9e488",
+        "model": "unknown"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
