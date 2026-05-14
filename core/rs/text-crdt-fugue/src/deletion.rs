@@ -11,11 +11,10 @@ use crate::util::{backing_table_name, escape_ident};
 /// SQL function `crsql_fugue_delete(table, col, row_pk, from, to)`:
 ///
 /// Deletes character range `[from, to)` from the rendered text of `(table.col, row_pk)`.
-/// Each overlapped sub-item is either wholly tombstoned (content NULL) or split into
-/// (left kept, middle tombstoned, right kept) parts.
-///
-/// #!~ Phase 4: child rows attached to a split sub-item all stay on the right portion (which
-///     keeps the original idx). For concurrent merge this needs a re-parent pass.
+/// Each overlapped sub-item is either wholly tombstoned (via the tombstoned boolean
+/// column, content preserved) or split into (left kept, middle tombstoned, right kept)
+/// parts. Coalescing runs inline after the split work, so adjacent same-itemId
+/// tombstones collapse before the explicit rerender.
 pub fn fugue_delete(
     ctx: *mut context,
     argc: i32,

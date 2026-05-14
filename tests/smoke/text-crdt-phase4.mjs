@@ -184,7 +184,6 @@ function fail(msg, dbs) {
 }
 
 console.log("\nPASS: Phase 4 base convergence verified");
-// #!~ Phase 5 — concurrent SPLIT (scenario 4) converges but produces duplicated content (e.g., "HeyHey  AND ").
-//     This is the case Weidner's cleanup-pass / NULL-tombstone-wins was designed for.
-//     Hypothesis property tests will reveal the divergence-or-corruption surface and tell us
-//     whether cleanup needs to be implemented before Phase 7 sync integration.
+// Note: concurrent SPLIT (scenario 4) previously produced duplicated content; the cleanup pass
+// (commit d9097790) deduplicates it. See tests/smoke/text-crdt-tighten-cleanup.mjs for the
+// dedup-verified version of scenario 4.

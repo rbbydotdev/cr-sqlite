@@ -65,10 +65,9 @@ insert(db, 0, "say ");
 if (body(db) !== "say hello world") fail(`expected 'say hello world', got ${JSON.stringify(body(db))}`);
 console.log("ok: prepend → 'say hello world'");
 
-// 4. Insert in the middle — this is the case-3 / split-run scenario.
-//    #!~ Phase 6: real mid-run split needs to split content; for now mid-run inserts
-//    snap to nearest run boundary. We accept that limitation for Phase 2.
-//    Inserting "great " between "say " and "hello" (position 4) should land cleanly.
+// 4. Insert at a boundary position (between "say " and "hello"). Mid-run splits
+//    at arbitrary offsets are covered by tests/smoke/text-crdt-tighten-mid-run.mjs;
+//    here we just verify boundary inserts work in the base Phase 2 path.
 insert(db, 4, "great ");
 if (body(db) !== "say great hello world")
   fail(`expected 'say great hello world', got ${JSON.stringify(body(db))}`);

@@ -1,8 +1,8 @@
-// #!~ Phase 6 perf: each insert loads ALL nodes for the row_pk and walks the tree linearly.
-// For 1000 random-position inserts on a growing doc this is O(n²) and observed ~100ms/op
-// after a few hundred rows. Fix paths: (a) maintain a render-cache keyed by row_pk version,
-// (b) navigate with indexed queries instead of full load, (c) implement Case 1 extension to
-// keep row count bounded. Gate-met cases (10K paste, 100 sequential keystrokes) stay fast.
+// Each insert loads the row_pk's backing rows and walks the tree linearly. Case 1
+// (in-place extension, shipped 8eb88fa6) keeps the row count bounded for typing
+// workloads — the 1000-random-position-insert pathological case is the only one
+// where O(n) load + walk shows up, and benchmarks against the alternatives
+// (slim load filtered by tombstoned=0) showed no win at current scales.
 extern crate alloc;
 use alloc::format;
 use alloc::string::String;
@@ -19,8 +19,10 @@ use crate::util::{backing_table_name, escape_ident};
 ///
 /// Returns the number of backing rows written (informational).
 ///
-/// #!~ Phase 6: implement Case 1 (extend our own most-recent run) for fewer rows
-/// #!~ Phase 4: revisit Case 3 for correctness under concurrent merge
+/// Case selection (mirrors Weidner's spec, issue #65):
+///   Case 1: extend our own most-recent run in place (shipped 8eb88fa6)
+///   Case 2: new child of the left neighbor (no children block)
+///   Case 3: sentinel under right's parent (left has children)
 pub fn fugue_insert(
     ctx: *mut context,
     argc: i32,
@@ -90,8 +92,9 @@ fn perform_insert(
 ) -> Result<usize, String> {
     let backing = backing_table_name(table, column);
 
-    // Load all nodes for this row_pk (Phase 2: full load is fine; a doc has tens to hundreds of rows).
-    // #!~ Phase 6: switch to a cursor-based walk if profiling shows quadratic
+    // Load all backing rows for this row_pk. With Case 1 + tombstone coalescing
+    // active, doc row counts stay bounded (typing workloads collapse to one row);
+    // the full load is fine in practice.
     let mut nodes = load_nodes(db, &backing, row_pk)
         .map_err(|_| format!("failed to load fugue nodes for row_pk={}", row_pk))?;
 
@@ -262,8 +265,11 @@ fn perform_insert(
                         // Left has (possibly all-invisible) children and we're at end-of-doc.
                         // Fall back to Case 2 — child of left. The new node sorts as a sibling of
                         // existing (tombstone/sentinel) children; (itemId, idx) ordering is then
-                        // determined by item-id hex. #!~ Phase 6: walk to the deepest-rightmost
-                        // descendant for stable end-of-doc append.
+                        // determined by item-id hex.
+                        // #!~ Edge case worth revisiting: a stable end-of-doc append might want
+                        // the new node placed as a child of the deepest-rightmost visible
+                        // descendant rather than as a sibling of left's children. Not exercised
+                        // by the Hypothesis trials so far.
                         (l, None)
                     }
                 }
@@ -457,85 +463,6 @@ fn load_nodes(db: *mut sqlite3, backing: &str, row_pk: i64) -> Result<Vec<Node>,
         });
     }
     Ok(out)
-}
-
-/// Walk the Fugue tree in render order; return (left, right) neighbor refs around `position`.
-///
-/// `position` is 0-based rendered char offset. `position = 0` → no left, right is first visible.
-/// `position >= total_chars` → left is last visible, no right.
-fn find_neighbors_at(nodes: &[Node], position: i32) -> (Option<NodeRef>, Option<NodeRef>) {
-    // Build children index: parent (item_id, idx) -> Vec<&Node>
-    // Iterate roots (parent = "" / -2) in (itemId, idx) order, recurse depth-first.
-    let visible = render_order(nodes);
-
-    // Each visible entry is (NodeRef, char_count). Walk accumulating offsets.
-    let mut consumed = 0i32;
-    let mut left: Option<NodeRef> = None;
-    for (node, len) in &visible {
-        if consumed + *len > position {
-            // The target position falls inside this run. For Fugue inserts, the relevant neighbors
-            // are still (this-run-or-prior, this-run). #!~ Phase 6: split runs mid-content for
-            // mid-run inserts. For Phase 2 we treat mid-run inserts as if at the start of this run.
-            return (left, Some(node.clone()));
-        }
-        consumed += len;
-        left = Some(node.clone());
-    }
-    (left, None) // position is at/past end of doc
-}
-
-/// Visible nodes in tree-walk order. Returns (ref, content.chars().count()) tuples.
-fn render_order(nodes: &[Node]) -> Vec<(NodeRef, i32)> {
-    // children index
-    use alloc::collections::BTreeMap;
-    let mut children: BTreeMap<(String, i32), Vec<&Node>> = BTreeMap::new();
-    for n in nodes {
-        children
-            .entry((n.parent_item_id.clone(), n.parent_idx))
-            .or_default()
-            .push(n);
-    }
-    for v in children.values_mut() {
-        v.sort_by(|a, b| (a.item_id.as_str(), a.idx).cmp(&(b.item_id.as_str(), b.idx)));
-    }
-
-    let mut out = Vec::new();
-    let mut stack: Vec<(String, i32)> = Vec::new();
-    stack.push((String::new(), -2)); // root
-    walk(&children, &mut stack, &mut out);
-    out
-}
-
-fn walk(
-    children: &alloc::collections::BTreeMap<(String, i32), Vec<&Node>>,
-    stack: &mut Vec<(String, i32)>,
-    out: &mut Vec<(NodeRef, i32)>,
-) {
-    let Some(top) = stack.last().cloned() else {
-        return;
-    };
-    if let Some(kids) = children.get(&top) {
-        for kid in kids {
-            // skip sentinels in the *visible* projection (still recurse into their subtree)
-            let is_sentinel = kid.idx == -1;
-            let is_tombstone = kid.content.is_none();
-            if !is_sentinel && !is_tombstone {
-                let chars = kid.content.as_ref().map(|s| s.chars().count() as i32).unwrap_or(0);
-                if chars > 0 {
-                    out.push((
-                        NodeRef {
-                            item_id: kid.item_id.clone(),
-                            idx: kid.idx,
-                        },
-                        chars,
-                    ));
-                }
-            }
-            stack.push((kid.item_id.clone(), kid.idx));
-            walk(children, stack, out);
-            stack.pop();
-        }
-    }
 }
 
 fn has_children(nodes: &[Node], parent: &NodeRef) -> bool {

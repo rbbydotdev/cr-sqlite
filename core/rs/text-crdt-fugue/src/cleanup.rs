@@ -10,17 +10,17 @@ use crate::util::{backing_table_name, escape_ident};
 
 /// SQL function `crsql_fugue_cleanup(table, col, row_pk) → INT (rows updated)`.
 ///
-/// Applies tantaman's smallest-index-first trim pass (issue #65, Weidner-endorsed) to the
-/// Fugue backing rows for a given (table.col, row_pk). After mutual sync of concurrent splits
-/// of the same item, peers each see overlapping sub-items with the same itemId. This pass
-/// trims the overlap so render output is the deterministic Fugue result.
+/// Two-pass cleanup of Fugue backing rows for a given (table.col, row_pk):
+///   1. tantaman's smallest-index-first trim pass (issue #65, Weidner-endorsed):
+///      after mutual sync of concurrent splits of the same item, peers each see
+///      overlapping sub-items with the same itemId. This pass trims the overlap
+///      so render output is the deterministic Fugue result.
+///   2. tombstone coalescing: drop non-rightmost adjacent same-itemId tombstones
+///      whose primary keys have no children. Compounds the row-count savings
+///      across subsequent operations on the same row_pk.
 ///
 /// Call after each sync-apply for correctness on concurrent split scenarios.
-///
-/// #!~ tighten-3: tombstone-wins-via-NULL is not enforced. If peers race a tombstone against a
-///     content edit on the same (itemId, idx) primary key, cr-sqlite's per-column LWW decides
-///     which value wins. A dedicated `tombstoned` boolean column would give monotonic "any peer
-///     said delete → it's deleted" semantics but requires a schema migration.
+/// (fugue_delete invokes this inline so local deletes already pay the cost.)
 pub fn fugue_cleanup(
     ctx: *mut context,
     argc: i32,
@@ -106,10 +106,9 @@ fn perform_cleanup(
                 }
                 let trim_offset = trim_offset_signed as usize;
                 if trim_offset >= chars.len() {
-                    // The overlap covers the entire later content. Weidner's spec keeps the row
-                    // around as a tombstone of zero-length content. We replace with empty string
-                    // for now. #!~ tighten-3: if we adopt a tombstoned boolean, set tombstoned=1
-                    // and leave content alone.
+                    // Overlap covers the entire later content. Replace with empty string;
+                    // the row remains in place (the tombstoned column, if set, stays set).
+                    // Coalescing later will drop it if it's a tombstone with no children.
                     let new_content = String::new();
                     if items[j].content.as_deref() != Some(&new_content) {
                         update_row_content(

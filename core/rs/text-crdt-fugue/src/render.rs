@@ -7,9 +7,9 @@ use sqlite_nostd as sqlite;
 use crate::util::{backing_table_name, escape_ident};
 
 /// Force-recompute the parent column for a single row_pk from the Fugue backing rows.
-/// Called by fugue_insert/delete/cleanup at end-of-function (after their writes,
-/// AFTER decrementing the active-counter so this render is itself trigger-suppressed
-/// only when callers exist) and by crsql_fugue_flush for explicit refresh paths.
+/// Called by fugue_insert/delete/cleanup at end-of-function (after their writes have
+/// been bracketed by active-counter so per-row triggers were suppressed) and by
+/// crsql_fugue_flush for explicit refresh paths.
 pub(crate) fn rerender_parent_column(
     db: *mut sqlite3,
     table: &str,
@@ -76,14 +76,14 @@ pub fn fugue_flush(
 
 /// SQL function `crsql_fugue_render(table, col, row_pk) → TEXT`.
 ///
-/// Returns the current rendered text for a Fugue-backed column. Bypasses any
-/// materialized parent-column state (which is itself a tracked CRDT cell and
-/// participates in cr-sqlite sync — leading to render-cascade issues during sync).
+/// Returns the current rendered text for a Fugue-backed column by walking the
+/// backing table directly. Reads are O(rows-for-this-row_pk).
 ///
-/// Reads are O(rows-for-this-row_pk). Use this in tests + as the canonical reader.
-///
-/// #!~ Phase 6: cache result on parent for fast direct SELECT, but in a way that doesn't
-///     feed back through cr-sqlite's CRR tracking — possibly a separate non-CRR sidecar table.
+/// The materialized parent column is kept fresh by per-row triggers in transparent
+/// mode (and the clock-untrack trigger prevents the body column from being shipped
+/// as a CRR cell, so there is no longer a render-cascade), so most callers can use
+/// `SELECT body FROM ...` directly. This function exists for tests, debugging, and
+/// any caller that wants a guaranteed-fresh read without depending on triggers.
 pub fn fugue_render(
     ctx: *mut context,
     argc: i32,

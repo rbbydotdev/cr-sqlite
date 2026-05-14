@@ -199,60 +199,71 @@ The Hypothesis suite is the gate. If randomized merges find divergence, the algo
 |-------|--------|---------|
 | 0 — scaffold crate | ✅ | `core/rs/text-crdt-fugue/`, init wired into bundle, build green |
 | 1 — `crsql_as_text_crdt` | ✅ | Registration creates backing table (`WITHOUT ROWID`), parent index, AFTER INSERT/UPDATE/DELETE render triggers; idempotent; non-CRR & missing-column rejected |
-| 2 — insert (Fugue 3-case) | ✅ | Cases 2 + 3 implemented; mid-run inserts snap to nearest boundary (#!~) |
-| 3 — delete (tombstones) | ✅ | Whole-row tombstone + split (L/M/R with tombstoned middle); rerender wired |
-| 4 — multi-peer merge | ✅ | All 4 hand-crafted scenarios converge; concurrent SPLIT produces semantic duplication (acceptable — convergence is the gate; cleanup-pass is #!~ for follow-up) |
-| 5 — Hypothesis property tests | ✅ | 200 random 2-peer + 100 random 3-peer trials, **0 divergences**; bug found and fixed (end-of-doc with tombstone children) |
-| 6 — bulk + perf sanity | ✅ | 10K paste = 0.2ms / 1 row; 100 sequential keystrokes = 29ms; 1000 random-position inserts O(n²) (#!~ for follow-up — outside the gate) |
-| 7 — e2e sync integration | ✅ | Text-CRDT column flows through `crsql_changes`; divergent edits on text + LWW title converge; plain rows still sync |
+| 2 — insert (Fugue 3-case) | ✅ | Cases 1 + 2 + 3 all implemented (Case 1 in `8eb88fa6`); mid-run inserts split correctly |
+| 3 — delete (tombstones) | ✅ | Whole-row tombstone + split (L/M/R with tombstoned middle); coalescing of adjacent same-itemId tombstones (`baa76278`) |
+| 4 — multi-peer merge | ✅ | Cleanup pass dedupes concurrent splits; all hand-crafted scenarios converge |
+| 5 — Hypothesis property tests | ✅ | 200 random 2-peer + 100 random 3-peer trials, **0 divergences** |
+| 6 — bulk + perf sanity | ✅ | See Browser Benchmarks section below |
+| 7 — e2e sync integration | ✅ | Text-CRDT column flows through `crsql_changes`; divergent edits converge; plain rows still sync |
 | 8 — finalize | ✅ | This update |
 
-**Test totals after all phases:** C 28/28, Python 246/246 (incl. 4 new Fugue tests with Hypothesis), 6 Node smoke scripts PASS.
+**Test totals after all phases:** C 28/28, Python 246/246, Node smokes 12/12.
 
-## Known tech-debt (`#!~` markers in source)
+## Resolved post-Phase-8
 
-### Resolved by tightening pass (2026-05-14, post-Phase-8)
+The substrate was tightened in three follow-up passes; every item from the original "where it falls short" list is resolved:
 
-- ✅ **Mid-run insert** — inserting at a position strictly inside a run now splits the run at the offset and lands the new content correctly. 7/7 mid-run tests pass; was previously snapping to nearest boundary.
-- ✅ **Cleanup pass for concurrent splits** — `crsql_fugue_cleanup(table, col, row_pk)` implements tantaman's smallest-index-first trim algorithm. Called after sync, it dedups overlapping sub-items same-itemId. Concurrent-split scenario went from `"Hey YOUHey AND there"` (duplicated) to `"Hey YOU AND there"` (correct Fugue render).
+- ✅ **Mid-run insert** (`d9097790`) — insertions strictly inside a run now split correctly.
+- ✅ **Cleanup pass for concurrent splits** (`d9097790`) — `crsql_fugue_cleanup` implements tantaman's smallest-index trim algorithm; dedups overlapping sub-items same-itemId after sync.
+- ✅ **Tombstone-wins-on-NULL race** (`b2f191dc`) — replaced content=NULL tombstone with a dedicated `tombstoned INTEGER NOT NULL DEFAULT 0` column. cr-sqlite's per-column LWW + ValueWin tie-break makes 1 always beat 0 → tombstone wins over concurrent content edits.
+- ✅ **Split-with-children re-parenting** — re-examined; not actually a gap. The right-half-keeps-original-idx convention preserves `parentIdx` references across splits.
+- ✅ **Transparent mode** (`e91eeb8c`) — triggers installed with a `WHEN counter=0` suppression clause; `fugue_*` functions bracket their work with a counter so per-row triggers don't fire-and-render during their writes. Clock-untrack trigger removes the materialized parent column from cr-sqlite's CRR tracking, eliminating the render cascade. Net: clients never need to call `crsql_fugue_flush`; `SELECT body` is always fresh after sync.
+- ✅ **Case 1 in-place run extension** (`8eb88fa6`) — typing-pattern row counts collapse (100 sequential appends → 1 row).
+- ✅ **Tombstone coalescing** (`baa76278`) — non-rightmost adjacent same-itemId tombstones get dropped (skipping any with children). Delete-heavy workloads now 3-16x faster than pre-coalescing.
 
-### Resolved in tightening pass (2026-05-14)
+## Known limits (by design, not bugs)
 
-- ✅ **Mid-run insert** — split-at-position before insert; lands at correct rendered offset
-- ✅ **Cleanup pass** for concurrent splits — tantaman's smallest-idx trim algorithm
-- ✅ **Tombstone-wins-on-NULL race** — replaced with dedicated `tombstoned INTEGER NOT NULL DEFAULT 0` column. Deletion sets `tombstoned=1` (content preserved for cleanup overlap math). cr-sqlite syncs the cell via per-column LWW; 0→1 monotonic, `1 > 0` under ValueWin → tombstone always wins regardless of concurrent content edits on the same primary key.
-- ✅ **Split-with-children re-parenting** — re-examined; not actually a gap. The right-half-keeps-original-idx convention preserves children's `parentIdx` references across splits. Removed from the "falls short" list.
+- **Cross-split deletion intent does not propagate.** If peer A whole-deletes row X while peer B concurrently splits X into L/M/R, A's tombstone applies only to X (now R portion). B's new L row — which A never saw — survives. Pure-CRDT semantics; "union of deletion intents" would require range-tombstone semantics outside Fugue's model.
+- **Parent table must have a single `INTEGER PRIMARY KEY NOT NULL`** aliased to rowid. Compound or TEXT PKs would need `row_pk` reshaped. `#!~` marker in `registration.rs` for the future extension.
+- **End-of-doc insertion when the last visible node has tombstone children** falls back to Case 2 (sibling of the tombstones). Ordering between the new node and the tombstone siblings is by item-id hex. Not exercised by 300 random Hypothesis trials. `#!~` marker in `insertion.rs` for future review.
 
-### Known limits (by design, not bugs)
+## Browser benchmarks (Apple Silicon / headless Chromium, median of 3)
 
-- **Cross-split deletion intent does not propagate.** If peer A whole-deletes row X while peer B concurrently splits X into L/M/R, A's tombstone applies only to X (now R portion). The new L row that B created — which A never saw — survives. This is pure-CRDT semantics; "union of deletion intents" would require range-tombstone semantics outside Fugue's model.
+```
+scenario                     median    rows
+smoke sanity (defer)            9.5      1
+100 appends (defer)            41.7      1     ← Case 1 collapses to 1 row
+10K paste (defer)               3.5      1
+200 deletes (defer)            96.3      3     ← coalescing dropped 199 tombstones
+100 mid-run inserts (defer)   145.4    103
+type+backspace 100 (defer)     45.9      1     ← coalescing collapses 100 to 1
+1K big-range delete (defer)     3.5      3
+100 churn ops (defer)         131.6     81
+2-peer sync 50 ops (defer)    135.7     59     ← bidirectional + cleanup
+```
 
-### Perf (deferred, outside Phase 6 gates)
+## Considered but rejected (no benchmark backing)
 
-- **`insertion.rs:1`** — each insert is O(n) (full node load + tree walk). 1000-op random-position session is ~100ms/op. Fix paths: render cache, indexed neighbor lookup, or Case-1 extension to keep n small.
-- **`insertion.rs:22`** — Case 1 (extend our own most-recent run in-place) is not implemented. Would halve row counts in long-lived docs.
-- **`insertion.rs:354`** — `itemId` uses `{site_hex}_{random_6_bytes}`. For ordering stability + Case-1 ownership checks, a monotonic counter is cleaner.
-- **`render.rs:17`** — `crsql_fugue_render` is the canonical reader; the materialized `notes.body` column is set by triggers but cascades through cr-sqlite as a tracked cell. Phase 5 caught this and tests use the render function. A separate non-CRR sidecar would let `SELECT body` work without cascade.
-
-### Schema/parent-shape limitations
-
-- **`registration.rs:57`** — parent table must have a single `INTEGER PRIMARY KEY NOT NULL` aliased to rowid. Compound or TEXT PKs need `row_pk` to be reshaped.
-- **`insertion.rs:160`** — end-of-doc inserts when the last visible node has tombstone children fall back to Case 2 (sibling of the tombstones). Sort order between the new node and the tombstone siblings is by item-id hex; semantically unstable but converges.
+- **Slim coalesce load** (filter tombstones at SQL level instead of full node load) — implemented and benchmarked; 5–28% **slower** because the extra prepare/bind per candidate exceeded the load savings. Reverted.
+- **Commit-hook batched rerender** — would batch renders across an entire transaction. Reintroduces the mid-tx-stale-reads semantic that transparent mode just fixed. Rejected without coding.
+- **Packed `(itemId, idx)` integer PK** — one-way door (wire format), per user's "back out easily" criteria. Deferred.
+- **R-Tree on rendered offsets** — rendered offsets aren't stable keys. Rejected.
 
 ## What this delivers
 
-A SQLite-resident text-CRDT column type, opt-in per parent column via `SELECT crsql_as_text_crdt('table', 'column')`, with these properties verified in 246 + 8 tests (post-tighten):
+A SQLite-resident text-CRDT column type, opt-in per parent column via `SELECT crsql_as_text_crdt('table', 'column')`, verified in C 28/28 + Python 246/246 + Node smokes 12/12 + browser benchmarks.
 
 1. Per-column text-CRDT semantics on a CRR — insertion + deletion at arbitrary positions, including mid-run splits
 2. N-peer convergence via cr-sqlite's existing `crsql_changes` protocol — no separate sync engine
-3. **Concurrent-split deduplication via `crsql_fugue_cleanup`** — call after sync to apply tantaman's trim algorithm; correct Fugue semantics restored on the "two humans co-typing the same line" case
-4. Native `.dylib` shipping; WASM rebuild still pending (task #8)
+3. Concurrent-split deduplication via `crsql_fugue_cleanup` (called inline from `fugue_delete`, also available for explicit post-sync invocation)
+4. Native `.dylib` + WASM (the wasm artifact ships with all tightening + Case 1 + coalescing)
 5. Coexists with LWW, OR-Set, Fractional Index, and CausalLengthSet columns on the same parent
+6. **Transparent mode** is the default: clients use the normal SQL surface (`SELECT body`, `INSERT INTO crsql_changes`) without needing to invoke any text-CRDT-specific flush after sync
 
 ## Public SQL surface
 
 ```sql
--- one-time per (table, column)
+-- one-time per (table, column). 3rd arg = eager flag, defaults to 0 (transparent mode).
 SELECT crsql_as_crr('notes');
 SELECT crsql_as_text_crdt('notes', 'body');
 
@@ -260,11 +271,17 @@ SELECT crsql_as_text_crdt('notes', 'body');
 SELECT crsql_fugue_insert('notes','body', row_pk, position, text);
 SELECT crsql_fugue_delete('notes','body', row_pk, from, to);
 
--- canonical read (bypasses materialization cascade)
+-- normal read — fresh after sync, no client work
+SELECT body FROM notes WHERE id = row_pk;
+
+-- guaranteed-fresh reader (for tests / debugging / mid-tx use)
 SELECT crsql_fugue_render('notes','body', row_pk);
 
--- run after each sync-apply for correctness on concurrent-split scenarios
+-- post-sync invocation is OPTIONAL — fugue_delete coalesces inline, and trim happens
+-- per fugue_* call automatically. Call this explicitly if you applied sync changes
+-- via INSERT INTO crsql_changes and want to run the trim pass right after.
 SELECT crsql_fugue_cleanup('notes','body', row_pk);
-```
 
-WASM rebuild is the largest remaining item; the v1 substrate is otherwise complete for native deployment.
+-- explicit refresh of the materialized parent column (rarely needed in transparent mode)
+SELECT crsql_fugue_flush('notes','body', row_pk);
+```

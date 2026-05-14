@@ -64,9 +64,10 @@ fn register(db: *mut sqlite3, table: &str, column: &str, eager: bool) -> Result<
         ));
     }
 
-    // #!~ Phase 1: parent must have a single INTEGER PRIMARY KEY (aliased to rowid).
-    // Compound PKs or TEXT PKs require row_pk to be a different shape — extend later.
-    // For now we don't enforce this; the render trigger will silently noop on mismatched parents.
+    // #!~ Parent must have a single INTEGER PRIMARY KEY (aliased to rowid). Compound
+    // PKs or TEXT PKs require row_pk to be a different shape (e.g. BLOB encoding the
+    // tuple). We don't enforce this here; the render trigger silently noops on
+    // mismatched parents so misuse is observable as "body never updates."
 
     let backing = backing_table_name(table, column);
     let backing_esc = escape_ident(&backing);
@@ -122,8 +123,9 @@ fn register(db: *mut sqlite3, table: &str, column: &str, eager: bool) -> Result<
     //      ALWAYS fire (no suppression). Slower for multi-row fugue calls (N triggers
     //      + 1 explicit rerender), kept for callers who explicitly want eager-everywhere
     //      semantics or for diagnostic comparison.
-    //    #!~ commit-hook integration could batch the explicit rerenders across
-    //      transactions (one render per row_pk per tx instead of one per fugue call).
+    //    Note: commit-hook batching (one render per row_pk per tx instead of one
+    //    per fugue call) was considered and rejected — it would reintroduce mid-tx
+    //    stale reads, which transparent mode just fixed. Not pursuing.
     ensure_active_counter_table(db)?;
     install_render_trigger(db, &backing, table, column, eager)?;
 
