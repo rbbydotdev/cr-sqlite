@@ -1,0 +1,19 @@
+README.md
+  s_3ac64368b6b350::t_74c8e54d7745f9 1-41,44,46,48-51,54-55,57,59,61-64,67-69,71,73-76,78,80-83,85-88,91,93-94,96-97,99-103,105-106,108-112,114-117,119,122-129,132,134-138,140,142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "58b6f41cbb5f5a189f0bed8a26c317e5399d0d1f",
+  "prompts": {},
+  "sessions": {
+    "s_3ac64368b6b350": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f72c2aa-4f1e-4680-9b3b-9f9423c9e488",
+        "model": "unknown"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
