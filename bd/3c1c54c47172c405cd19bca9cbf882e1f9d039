@@ -1,0 +1,37 @@
+tests/browser/benchmarks.js
+  s_3ac64368b6b350::t_4684454dfc3dc6 173,175,178-182
+  s_3ac64368b6b350::t_bf68ef4a0e76fc 1-13,15-92,94,96-99,101,104-111,113,115-116,118-119,121,124-132,134-138,140-172,176-177,183-186,188,190-191,193-213
+  s_3ac64368b6b350::t_6f3099d11c0f97 93,95,100,102-103,112,114,117,120,122-123,133,139
+  s_3ac64368b6b350::t_f80754db029ed0 14
+  s_3ac64368b6b350::t_731c33db36e3f2 174
+  s_3ac64368b6b350::t_e60cba244e3151 187,189,192
+tests/browser/run.mjs
+  s_3ac64368b6b350::t_e49770261a9bd4 1-36,38,42-45,57-83
+  s_3ac64368b6b350::t_3d230fd4d542fd 37,39-41
+  s_3ac64368b6b350::t_e078391b5aeb6b 46-56
+core/rs/bundle/src/lib.rs
+  s_3ac64368b6b350::t_a13e13f6cb11ca 7-8
+tests/browser/index.html
+  s_3ac64368b6b350::t_4c3ec3b9b1128b 27
+  s_3ac64368b6b350::t_8af26d6c1f1d0c 1-26,28-29
+tests/browser/serve.mjs
+  s_3ac64368b6b350::t_3d18ec3570bb71 1-44
+tests/smoke/text-crdt-wasm.mjs
+  s_3ac64368b6b350::t_d0d50e714e0369 1-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "bd3c1c54c47172c405cd19bca9cbf882e1f9d039",
+  "prompts": {},
+  "sessions": {
+    "s_3ac64368b6b350": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f72c2aa-4f1e-4680-9b3b-9f9423c9e488",
+        "model": "unknown"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
