@@ -4,6 +4,8 @@
 
 extern crate alloc;
 
+#[cfg(target_family = "wasm")]
+use core::alloc::Layout;
 use core::ffi::c_char;
 use core::panic::PanicInfo;
 use crsql_core;

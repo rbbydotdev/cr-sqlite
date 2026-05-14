@@ -75,6 +75,8 @@ version = "0.1.0"
 dependencies = [
  "crsql_core",
  "crsql_fractindex_core",
+ "crsql_text_crdt_fugue",
+ "libc-print",
  "sqlite_nostd",
 ]
 
@@ -83,6 +85,7 @@ name = "crsql_core"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "libc-print",
  "num-derive",
  "num-traits",
  "sqlite_nostd",
@@ -90,6 +93,13 @@ dependencies = [
 
 [[package]]
 name = "crsql_fractindex_core"
+version = "0.1.0"
+dependencies = [
+ "sqlite_nostd",
+]
+
+[[package]]
+name = "crsql_text_crdt_fugue"
 version = "0.1.0"
 dependencies = [
  "sqlite_nostd",
@@ -121,9 +131,18 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "libc"
-version = "0.2.151"
+version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "302d7ab3130588088d277783b1e2d2e10c9e9e4a16dd9050e6ec93fb3e7048f4"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[package]]
+name = "libc-print"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e4fb34ccfede7d939c50cf24b65e228fa2af1d3b49f6efd44b080dd3dcf2f1e"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "libloading"
