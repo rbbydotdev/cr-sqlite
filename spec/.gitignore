@@ -1,0 +1,5 @@
+# Local TLC working directory — regenerated on each run.
+tlc-output/
+
+# Build tools, downloaded on demand per README.
+tools/tla2tools.jar
