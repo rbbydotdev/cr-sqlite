@@ -1,0 +1,19 @@
+web/app.js
+  s_3ac64368b6b350::t_0234ec79321856 147-152
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "caec72acba1804eb04027c73bfef26e3ebd2129b",
+  "prompts": {},
+  "sessions": {
+    "s_3ac64368b6b350": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f72c2aa-4f1e-4680-9b3b-9f9423c9e488",
+        "model": "unknown"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
