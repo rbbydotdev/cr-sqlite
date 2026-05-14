@@ -6,6 +6,8 @@ extern crate alloc;
 
 mod active;
 mod cleanup;
+#[cfg(feature = "debug-monitor")]
+pub mod debug_monitor;
 mod deletion;
 mod insertion;
 mod registration;
@@ -155,6 +157,25 @@ pub extern "C" fn sqlite3_crsqltextcrdtfugue_init(
         None,
     ) {
         return rc as c_int;
+    }
+
+    // Opt-in: when built with feature `debug-monitor`, expose a UDF so callers
+    // (tests, dev sessions) can install the preupdate-hook invariant check
+    // dynamically without rebuilding the dylib for every session.
+    #[cfg(feature = "debug-monitor")]
+    {
+        if let Err(rc) = db.create_function_v2(
+            "crsql_fugue_install_monitor",
+            0,
+            sqlite::UTF8 | sqlite::DIRECTONLY,
+            None,
+            Some(debug_monitor::install_monitor_udf),
+            None,
+            None,
+            None,
+        ) {
+            return rc as c_int;
+        }
     }
 
     ResultCode::OK as c_int

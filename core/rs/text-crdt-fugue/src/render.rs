@@ -1,10 +1,35 @@
 extern crate alloc;
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use sqlite::{args, context, sqlite3, Connection, Context, Destructor, ResultCode, Value};
 use sqlite_nostd as sqlite;
 
 use crate::util::{backing_table_name, escape_ident};
+
+const ROOT_ITEM: &str = "";
+const ROOT_IDX: i32 = -2;
+
+/// Engine-reserved prefix for deletion-marker rows. A marker is a tombstoned
+/// child whose `content` holds the deleted text and whose `parent_idx` is the
+/// LAST char of the covered range in the parent. Markers carry no own content
+/// in the render output — they just hide a span of their parent's chars.
+const DELETION_MARKER_PREFIX: &str = "DM_";
+
+fn is_deletion_marker(row: &Row) -> bool {
+    row.tombstoned && row.item_id.starts_with(DELETION_MARKER_PREFIX)
+}
+
+#[derive(Clone, Debug)]
+struct Row {
+    item_id: String,
+    idx: i32,
+    content: String,
+    parent_item_id: String,
+    parent_idx: i32,
+    tombstoned: bool,
+}
 
 /// Force-recompute the parent column for a single row_pk from the Fugue backing rows.
 /// Called by fugue_insert/delete/cleanup at end-of-function (after their writes have
@@ -91,12 +116,15 @@ pub fn fugue_render(
     }
 }
 
-/// Render the canonical text from backing rows. After the apply-time split +
-/// cleanup pipeline (registration.rs install_split_trigger + cleanup_trigger),
-/// the tree is fully canonical: every child's parentIdx equals its parent's
-/// terminal idx, and no overlapping/duplicate runs survive. So the simple
-/// exact-idx recursive CTE matches what the auto-render trigger produces by
-/// construction.
+/// β-flat procedural render. Loads all backing rows for `row_pk`, then walks the
+/// Fugue tree in-order, interleaving mid-content children at their `parentIdx`
+/// positions.
+///
+/// For canonical trees (every child has `parentIdx == parent.idx`, i.e. attaches
+/// after the parent's last char), this produces the same output as the old
+/// recursive-CTE renderer. For β-flat trees, where a child can attach inside a
+/// multi-char parent's content range, it interleaves correctly — the CTE version
+/// would silently drop such children because its join required exact-idx match.
 fn compute_render(
     db: *mut sqlite3,
     table: &str,
@@ -106,26 +134,162 @@ fn compute_render(
     let backing = backing_table_name(table, column);
     let backing_esc = escape_ident(&backing);
 
-    let sql = format!(
-        "WITH RECURSIVE under_node(content, level, itemId, idx, tombstoned) AS (\
-            VALUES ('', 0, '', -2, 0) \
-            UNION ALL \
-            SELECT f.content, under_node.level + 1, f.itemId, f.idx, f.tombstoned \
-              FROM \"{backing}\" f \
-              JOIN under_node ON f.parentItemId = under_node.itemId AND f.parentIdx = under_node.idx \
-              WHERE f.row_pk = ? \
-              ORDER BY 2 DESC, f.itemId, f.idx \
-         ) \
-         SELECT IFNULL(group_concat(content, ''), '') FROM under_node \
-         WHERE idx != -1 AND tombstoned = 0",
-        backing = backing_esc
-    );
+    let rows = load_rows(db, &backing_esc, row_pk)?;
+    let by_parent = group_children_by_parent(&rows);
 
-    let stmt = db.prepare_v2(&sql).map_err(|_| String::from("prepare render"))?;
-    stmt.bind_int64(1, row_pk).map_err(|_| String::from("bind row_pk"))?;
-    if stmt.step().map_err(|_| String::from("step render"))? == ResultCode::ROW {
-        Ok(String::from(stmt.column_text(0).map_err(|_| String::from("column_text"))?))
-    } else {
-        Ok(String::new())
+    let mut out = String::new();
+    walk_root_children(&by_parent, &mut out);
+    Ok(out)
+}
+
+/// SELECT every row for this doc — one round-trip rather than a recursive
+/// per-edge join.
+fn load_rows(db: *mut sqlite3, backing_esc: &str, row_pk: i64) -> Result<Vec<Row>, String> {
+    let sql = format!(
+        "SELECT itemId, idx, content, parentItemId, parentIdx, tombstoned \
+           FROM \"{}\" WHERE row_pk = ?",
+        backing_esc
+    );
+    let stmt = db
+        .prepare_v2(&sql)
+        .map_err(|_| String::from("prepare load rows"))?;
+    stmt.bind_int64(1, row_pk)
+        .map_err(|_| String::from("bind row_pk"))?;
+
+    let mut rows = Vec::new();
+    loop {
+        match stmt.step().map_err(|_| String::from("step load rows"))? {
+            ResultCode::ROW => {
+                let content = match stmt.column_text(2) {
+                    Ok(s) => String::from(s),
+                    Err(_) => String::new(),
+                };
+                let parent_item_id = match stmt.column_text(3) {
+                    Ok(s) => String::from(s),
+                    Err(_) => String::new(),
+                };
+                rows.push(Row {
+                    item_id: String::from(
+                        stmt.column_text(0).map_err(|_| String::from("itemId"))?,
+                    ),
+                    idx: stmt.column_int(1),
+                    content,
+                    parent_item_id,
+                    parent_idx: stmt.column_int(4),
+                    tombstoned: stmt.column_int(5) != 0,
+                });
+            }
+            _ => break,
+        }
+    }
+    Ok(rows)
+}
+
+/// Group rows by their `parent_item_id` so we can find children in O(1) per
+/// parent during the walk. Within each group children are sorted by
+/// (`parent_idx`, `item_id`, `idx`) so siblings at the same attachment position
+/// emit in deterministic Fugue tie-break order.
+fn group_children_by_parent<'a>(rows: &'a [Row]) -> BTreeMap<&'a str, Vec<&'a Row>> {
+    let mut by_parent: BTreeMap<&'a str, Vec<&'a Row>> = BTreeMap::new();
+    for r in rows {
+        by_parent
+            .entry(r.parent_item_id.as_str())
+            .or_default()
+            .push(r);
+    }
+    for v in by_parent.values_mut() {
+        v.sort_by(|a, b| {
+            a.parent_idx
+                .cmp(&b.parent_idx)
+                .then_with(|| a.item_id.cmp(&b.item_id))
+                .then_with(|| a.idx.cmp(&b.idx))
+        });
+    }
+    by_parent
+}
+
+fn walk_root_children<'a>(
+    by_parent: &BTreeMap<&'a str, Vec<&'a Row>>,
+    out: &mut String,
+) {
+    if let Some(kids) = by_parent.get(ROOT_ITEM) {
+        for kid in kids.iter().filter(|r| r.parent_idx == ROOT_IDX) {
+            walk_node(kid, by_parent, out);
+        }
+    }
+}
+
+/// Walk a single node: emit its content char-by-char, and at each absolute char
+/// position check for children whose `parent_idx` equals that position. Mid-
+/// content children render between the appropriate chars of the parent.
+///
+/// Deletion-marker children (β-flat partial-delete encoding) suppress emission
+/// of the parent chars in the covered range. Markers are pre-scanned before the
+/// char walk to build a `covered_positions` set.
+///
+/// Sentinel rows (`idx == -1`, used by the existing Case-3 insertion logic) have
+/// no content and serve only as tree-shape anchors; we walk straight through to
+/// their children.
+fn walk_node<'a>(
+    node: &'a Row,
+    by_parent: &BTreeMap<&'a str, Vec<&'a Row>>,
+    out: &mut String,
+) {
+    let chars: Vec<char> = node.content.chars().collect();
+    let kids = by_parent.get(node.item_id.as_str());
+
+    // Empty-content rows (sentinels or rows whose content is intentionally empty):
+    // there are no chars to walk, but children attached at this row's idx must
+    // still be visited.
+    if chars.is_empty() {
+        if let Some(kids_v) = kids {
+            for kid in kids_v.iter().filter(|k| k.parent_idx == node.idx) {
+                walk_node(kid, by_parent, out);
+            }
+        }
+        return;
+    }
+
+    let n_chars = chars.len() as i32;
+    let first_idx = node.idx - n_chars + 1;
+
+    // Pre-scan markers to build the set of parent chars they cover. A marker's
+    // `parent_idx` is the LAST covered position; its content length is the span.
+    let mut covered_until: Option<i32> = None;
+    let mut covered_set: alloc::collections::BTreeSet<i32> =
+        alloc::collections::BTreeSet::new();
+    if let Some(kids_v) = kids {
+        for kid in kids_v.iter() {
+            if is_deletion_marker(kid)
+                && kid.parent_idx >= first_idx
+                && kid.parent_idx <= node.idx
+            {
+                let span = kid.content.chars().count() as i32;
+                let start = (kid.parent_idx - span + 1).max(first_idx);
+                let end = kid.parent_idx;
+                for p in start..=end {
+                    covered_set.insert(p);
+                }
+                covered_until = Some(covered_until.unwrap_or(i32::MIN).max(end));
+            }
+        }
+    }
+    let _ = covered_until; // reserved for fast-path skip optimisation
+
+    for (offset, ch) in chars.iter().enumerate() {
+        let abs_idx = first_idx + (offset as i32);
+
+        if !node.tombstoned && node.idx != -1 && !covered_set.contains(&abs_idx) {
+            out.push(*ch);
+        }
+
+        if let Some(kids_v) = kids {
+            for kid in kids_v
+                .iter()
+                .filter(|k| k.parent_idx == abs_idx && !is_deletion_marker(k))
+            {
+                walk_node(kid, by_parent, out);
+            }
+        }
     }
 }

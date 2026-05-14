@@ -86,22 +86,20 @@ fn perform_delete(
     // Build render order with cumulative offsets.
     let visible = render_order_with_offsets(&nodes);
 
-    // Phase 3: collect ops first (snapshot view), then apply. Avoids iterator-vs-mutation issues.
+    // β-flat deletion: a partial delete inserts a single deletion-marker child
+    // (tombstoned, with the deleted text as content) instead of splitting the
+    // parent into L/M/R + UPDATEing the parent's content. The render walker
+    // hides the covered parent positions on read. The atomic-row invariant is
+    // preserved — the parent row's `content` cell is never UPDATEd.
     enum Op {
         WholeTombstone {
             item_id: String,
             idx: i32,
         },
-        SplitLeftMiddleRight {
-            item_id: String,
-            orig_idx: i32,
+        DeletionMarker {
             parent_item_id: String,
-            parent_idx: i32,
-            l_text: Option<String>, // None if empty
-            l_idx: Option<i32>,
-            m_idx: i32, // tombstone
-            m_text: String, // deleted content — preserved so cleanup-pass can detect overlap
-            r_text: Option<String>, // None if empty (use NULL on existing row)
+            cover_end_idx: i32, // LAST parent position covered
+            deleted_text: String, // length encodes the cover span
         },
     }
 
@@ -132,26 +130,16 @@ fn perform_delete(
                 idx: entry.idx,
             });
         } else {
-            // Logical position of the original row's content in original-item space:
-            //   a = idx - len + 1 (first index), b = idx (last index)
-            let a = entry.idx - (len as i32) + 1;
-            let l_idx = if !l_text.is_empty() {
-                Some(a + (local_from as i32) - 1)
-            } else {
-                None
-            };
-            let m_idx = a + (local_to as i32) - 1;
+            // Partial delete: insert a marker that covers parent positions
+            //   [entry.idx - len + 1 + local_from, entry.idx - len + local_to]
+            // We anchor the marker by its `parent_idx` = LAST covered position;
+            // the render walker reconstructs the cover span from `content` length.
+            let cover_end_idx = entry.idx - (len as i32) + (local_to as i32);
 
-            ops.push(Op::SplitLeftMiddleRight {
-                item_id: entry.item_id.clone(),
-                orig_idx: entry.idx,
-                parent_item_id: entry.parent_item_id.clone(),
-                parent_idx: entry.parent_idx,
-                l_text: if l_text.is_empty() { None } else { Some(l_text) },
-                l_idx,
-                m_idx,
-                m_text,
-                r_text: if r_text.is_empty() { None } else { Some(r_text) },
+            ops.push(Op::DeletionMarker {
+                parent_item_id: entry.item_id.clone(),
+                cover_end_idx,
+                deleted_text: m_text,
             });
         }
     }
@@ -165,57 +153,35 @@ fn perform_delete(
                 mark_tombstoned(db, &backing, row_pk, &item_id, idx)?;
                 writes += 1;
             }
-            Op::SplitLeftMiddleRight {
-                item_id,
-                orig_idx,
+            Op::DeletionMarker {
                 parent_item_id,
-                parent_idx,
-                l_text,
-                l_idx,
-                m_idx,
-                m_text,
-                r_text,
+                cover_end_idx,
+                deleted_text,
             } => {
-                match r_text {
-                    Some(r) => {
-                        // Existing row becomes R (still at orig_idx, tombstoned=0).
-                        update_content(db, &backing, row_pk, &item_id, orig_idx, Some(&r))?;
-                        // Insert M tombstone at m_idx (tombstoned=1). Preserve deleted content
-                        // so cleanup-pass can detect overlap with concurrent L-portions same itemId.
-                        insert_split_part(
-                            db,
-                            &backing,
-                            row_pk,
-                            &item_id,
-                            m_idx,
-                            Some(&m_text),
-                            &parent_item_id,
-                            parent_idx,
-                            /*tombstoned=*/ true,
-                        )?;
-                        writes += 2;
-                    }
-                    None => {
-                        // No right portion: existing row becomes M (whole-tail tombstone).
-                        // Preserve content; just flip tombstoned.
-                        mark_tombstoned(db, &backing, row_pk, &item_id, orig_idx)?;
-                        writes += 1;
-                    }
-                }
-                if let (Some(l), Some(li)) = (l_text, l_idx) {
-                    insert_split_part(
-                        db,
-                        &backing,
-                        row_pk,
-                        &item_id,
-                        li,
-                        Some(&l),
-                        &parent_item_id,
-                        parent_idx,
-                        /*tombstoned=*/ false,
-                    )?;
-                    writes += 1;
-                }
+                // Generate a fresh marker itemId with the engine-reserved prefix.
+                // The prefix lets the render walker recognise this row as a
+                // span-cover marker rather than a regular tombstoned insert.
+                let raw_id = crate::insertion::fresh_item_id(db)
+                    .map_err(|_| String::from("deletion: fresh item_id"))?;
+                let marker_id = format!("DM_{}", raw_id);
+                // Marker rows store the deleted text as their `content` (its
+                // length encodes how many parent chars the marker covers) and
+                // attach to the parent at `cover_end_idx`. The marker's own
+                // `idx` is irrelevant to the render walk and just needs to
+                // satisfy the PK uniqueness constraint — we use `cover_end_idx`
+                // for clarity (different marker itemIds = different PKs).
+                insert_split_part(
+                    db,
+                    &backing,
+                    row_pk,
+                    &marker_id,
+                    cover_end_idx,
+                    Some(&deleted_text),
+                    &parent_item_id,
+                    cover_end_idx,
+                    /*tombstoned=*/ true,
+                )?;
+                writes += 1;
             }
         }
     }

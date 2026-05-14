@@ -91,19 +91,24 @@ function fail(msg, dbs) {
   console.log("ok: concurrent whole-delete on same row converges to empty");
 }
 
-// Scenario 2: same-PK tombstone-vs-content-edit race.
-// A whole-deletes a row (sets tombstoned=1, content preserved).
-// B concurrently does a mid-run insert that SPLITS the same row — the split UPDATEs the
-// existing row's content to the R-half (no tombstoning of that row by B).
-// → both peers update DIFFERENT cells of the same PK:
-//     A's tombstoned cell: 0 → 1
-//     B's content cell:    "hello" → "lo" (the R-half of B's split)
-// After sync, per-cell LWW: tombstoned=1 wins (1 > 0 ValueWin), content takes whichever's higher.
-// Render filters tombstoned=1, so the row is invisible regardless of which content cell won.
+// Scenario 2: whole-delete vs mid-run insert on the same row.
 //
-// Pre-tombstoned-column, this race put A's content=NULL up against B's "lo" — B's
-// content could win under LWW, "resurrecting" the deleted text. With the boolean column,
-// the row stays gone.
+// A whole-deletes the row (tombstoned=1).
+// B mid-run inserts "X" at position 2. Under β-flat semantics, B does NOT split
+// the row — instead X attaches as a child with parentIdx pointing into the row's
+// content range. The row's content cell is never mutated; atomic-row holds.
+//
+// After sync:
+//   - The row is tombstoned (A's flip wins via cr-sqlite's LWW since 1 > 0).
+//   - The render walks the tombstoned row, skips emitting its chars, but still
+//     visits children at their attachment positions.
+//   - X (child of the tombstoned row at parentIdx=1) is emitted.
+//   - Final render: "X".
+//
+// Pre-β-flat split-based code produced "heX" because B's split materialized a
+// new "he" row that A's whole-row tombstone didn't target. That outcome was an
+// implementation artifact: A's intent was "delete all of 'hello'," and β-flat
+// honors that intent — only B's separate insertion survives.
 {
   const a = open();
   const b = open();
@@ -130,15 +135,15 @@ function fail(msg, dbs) {
   console.log(`A: ${JSON.stringify(aBody)} | B: ${JSON.stringify(bBody)}`);
   if (aBody !== bBody) fail(`scenario 2 diverged: A=${aBody} B=${bBody}`, [["a", a], ["b", b]]);
 
-  // Expected: tombstone-wins makes the ORIGINAL row invisible. The L-half "he" and B's "X"
-  // remain (they're separate rows that A never had to compete with). Result: "heX".
-  // Pre-fix, this would have included "llo" or "hello" depending on which content won.
-  if (aBody !== "heX")
+  // β-flat: only B's separate insert "X" survives. A's whole-row tombstone
+  // removes everything in that row; the split-based "heX" outcome was a pre-
+  // β-flat implementation artifact.
+  if (aBody !== "X")
     fail(
-      `tombstone-wins violated: expected 'heX' (original row tombstoned, splits survive), got ${JSON.stringify(aBody)}`,
+      `tombstone-wins (β-flat) violated: expected 'X' (whole row tombstoned, only child survives), got ${JSON.stringify(aBody)}`,
       [["a", a], ["b", b]],
     );
-  console.log("ok: tombstone wins over concurrent content edit (same-PK race)");
+  console.log("ok: tombstone wins over concurrent mid-run insert (β-flat semantics)");
 }
 
 // Scenario 3: overlapping partial deletes — converge deterministically, *not* to the union

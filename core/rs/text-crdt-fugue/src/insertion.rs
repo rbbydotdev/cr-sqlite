@@ -1,8 +1,8 @@
-// Each insert loads the row_pk's backing rows and walks the tree linearly. Case 1
-// (in-place extension, shipped 8eb88fa6) keeps the row count bounded for typing
-// workloads — the 1000-random-position-insert pathological case is the only one
-// where O(n) load + walk shows up, and benchmarks against the alternatives
-// (slim load filtered by tombstoned=0) showed no win at current scales.
+// Each insert loads the row_pk's backing rows and walks the tree linearly.
+// Typing workloads grow row count linearly (one row per keystroke); the
+// 1000-random-position-insert pathological case is the only place where the
+// O(n) load + walk shows up, and benchmarks against the alternatives (slim
+// load filtered by tombstoned=0) showed no win at current scales.
 extern crate alloc;
 use alloc::format;
 use alloc::string::String;
@@ -20,7 +20,6 @@ use crate::util::{backing_table_name, escape_ident};
 /// Returns the number of backing rows written (informational).
 ///
 /// Case selection (mirrors Weidner's spec, issue #65):
-///   Case 1: extend our own most-recent run in place (shipped 8eb88fa6)
 ///   Case 2: new child of the left neighbor (no children block)
 ///   Case 3: sentinel under right's parent (left has children)
 pub fn fugue_insert(
@@ -92,78 +91,54 @@ fn perform_insert(
 ) -> Result<usize, String> {
     let backing = backing_table_name(table, column);
 
-    // Load all backing rows for this row_pk. With Case 1 + tombstone coalescing
-    // active, doc row counts stay bounded (typing workloads collapse to one row);
-    // the full load is fine in practice.
+    // Load all backing rows for this row_pk. Row count grows with edits; the
+    // full load is fine at current scales (see top-of-file note).
     let mut nodes = load_nodes(db, &backing, row_pk)
         .map_err(|_| format!("failed to load fugue nodes for row_pk={}", row_pk))?;
 
-    // Walk to find neighbors. If position is strictly INSIDE a run (mid-run), split it first.
-    let mut split_writes = 0usize;
+    // Walk to find neighbors. Mid-run is handled β-flat (no split — new insert
+    // attaches at parentIdx inside the entry's content range). `split_writes`
+    // stays 0; we kept the binding to preserve the return-value shape.
+    let split_writes = 0usize;
     let (left, right) = match find_neighbors_or_split(&nodes, position) {
         NeighborLookup::Boundary { left, right } => (left, right),
         NeighborLookup::MidRun {
             entry_item_id,
             entry_idx,
             split_offset,
-            parent_item_id,
-            parent_idx,
+            parent_item_id: _,
+            parent_idx: _,
         } => {
-            // Split the entry row at `split_offset`. Existing row keeps its idx and becomes the
-            // RIGHT half (preserving any children attached to the original idx). A new row is
-            // INSERTed for the LEFT half with a fresh idx in (logical) original-item-position space.
+            // β-flat: don't split the entry row. The new insert attaches at a
+            // mid-content position via parentIdx pointing inside the entry's
+            // content range. The render walker interleaves children at their
+            // attachment positions. No cell-level UPDATE of `content` — the
+            // atomic-row invariant the TLA+ proof relies on.
+            //
+            // Compute the absolute position the new insert attaches AFTER. The
+            // entry's content covers absolute idx values
+            //   [entry_idx - len(content) + 1, entry_idx]
+            // and `split_offset` (1-indexed: number of chars in the left half)
+            // maps to attaching after absolute idx
+            //   first_idx + split_offset - 1
+            // i.e. between chars `split_offset - 1` and `split_offset` of the
+            // entry's content.
             let entry = nodes
                 .iter()
                 .find(|n| n.item_id == entry_item_id && n.idx == entry_idx)
-                .ok_or_else(|| String::from("internal: split entry not found"))?;
-            let content = entry
+                .ok_or_else(|| String::from("internal: mid-run entry not found"))?;
+            let content_len = entry
                 .content
-                .clone()
-                .ok_or_else(|| String::from("internal: split entry has no content"))?;
-            let chars: Vec<char> = content.chars().collect();
-            let l_text: String = chars.iter().take(split_offset).collect();
-            let r_text: String = chars.iter().skip(split_offset).collect();
-            // a = entry_idx - len + 1 (first index occupied by this entry's content)
-            let a = entry_idx - (chars.len() as i32) + 1;
-            let left_new_idx = a + (split_offset as i32) - 1;
-
-            // UPDATE existing: content = right half
-            update_row_content(db, &backing, row_pk, &entry_item_id, entry_idx, Some(&r_text))?;
-            // INSERT new left half (same itemId, new idx, same parent)
-            insert_node(
-                db,
-                &backing,
-                row_pk,
-                &entry_item_id,
-                left_new_idx,
-                Some(&l_text),
-                &parent_item_id,
-                parent_idx,
-                /*or_ignore=*/ false,
-            )
-            .map_err(|_| String::from("failed to insert split left half"))?;
-            split_writes = 2;
-
-            // Update in-memory snapshot to reflect the split, so subsequent has_children logic is correct.
-            // Mutate existing entry's content; push new left row.
-            for n in nodes.iter_mut() {
-                if n.item_id == entry_item_id && n.idx == entry_idx {
-                    n.content = Some(r_text.clone());
-                }
-            }
-            nodes.push(Node {
-                item_id: entry_item_id.clone(),
-                idx: left_new_idx,
-                content: Some(l_text),
-                parent_item_id: parent_item_id.clone(),
-                parent_idx,
-                tombstoned: false,
-            });
+                .as_ref()
+                .map(|c| c.chars().count())
+                .unwrap_or(0) as i32;
+            let first_idx = entry_idx - content_len + 1;
+            let attachment_idx = first_idx + (split_offset as i32) - 1;
 
             (
                 Some(NodeRef {
                     item_id: entry_item_id.clone(),
-                    idx: left_new_idx,
+                    idx: attachment_idx,
                 }),
                 Some(NodeRef {
                     item_id: entry_item_id,
@@ -172,30 +147,6 @@ fn perform_insert(
             )
         }
     };
-
-    // Case 1 (Weidner): extend our own most-recent run in place instead of creating a new row.
-    // Allowed when ALL hold:
-    //   (a) we created the left neighbor's item (itemId starts with our site_id hex)
-    //   (b) the left neighbor is the rightmost row for its itemId (no peer split it)
-    //   (c) the left neighbor has no children (no concurrent insert sits past it)
-    // Effect: UPDATE existing row's content (append `text`) and bump idx by chars added.
-    // PK change is materially DELETE + INSERT in cr-sqlite's change log — fine because
-    // the precondition guarantees no children reference the old idx.
-    if let Some(l) = &left {
-        let site_hex =
-            current_site_hex(db).map_err(|_| String::from("failed to query crsql_site_id"))?;
-        let we_created = l.item_id.starts_with(&site_hex);
-        let is_rightmost = !nodes
-            .iter()
-            .any(|n| n.item_id == l.item_id && n.idx > l.idx);
-        let has_kids = nodes
-            .iter()
-            .any(|n| n.parent_item_id == l.item_id && n.parent_idx == l.idx);
-        if we_created && is_rightmost && !has_kids {
-            extend_run_in_place(db, &backing, row_pk, l, text)?;
-            return Ok(split_writes); // No new row beyond any split that already happened
-        }
-    }
 
     // Generate a fresh item_id for this insertion.
     let new_item_id = fresh_item_id(db).map_err(|_| String::from("failed to generate item_id"))?;
@@ -415,7 +366,7 @@ fn walk_visible<'a>(
     }
 }
 
-pub(crate) fn update_row_content(
+fn update_row_content(
     db: *mut sqlite3,
     backing: &str,
     row_pk: i64,
@@ -471,7 +422,7 @@ fn has_children(nodes: &[Node], parent: &NodeRef) -> bool {
         .any(|n| n.parent_item_id == parent.item_id && n.parent_idx == parent.idx)
 }
 
-pub(crate) fn insert_node(
+fn insert_node(
     db: *mut sqlite3,
     backing: &str,
     row_pk: i64,
@@ -504,54 +455,12 @@ pub(crate) fn insert_node(
 }
 
 /// Generate a fresh item_id: hex(crsql_site_id()) prefix + random suffix.
-/// Site prefix lets Case-1 extension recognize "our" items.
 ///
 /// #!~ tighten to {site}.{monotonic_counter} for ordering stability
-fn fresh_item_id(db: *mut sqlite3) -> Result<String, ResultCode> {
+pub(crate) fn fresh_item_id(db: *mut sqlite3) -> Result<String, ResultCode> {
     let stmt = db.prepare_v2(
         "SELECT lower(hex(crsql_site_id())) || '_' || lower(hex(randomblob(6)))",
     )?;
     stmt.step()?;
     Ok(String::from(stmt.column_text(0)?))
-}
-
-/// Hex-encoded crsql_site_id() — used as a prefix in itemId so Case 1 can detect
-/// "we created this item." Same encoding as fresh_item_id's prefix.
-fn current_site_hex(db: *mut sqlite3) -> Result<String, ResultCode> {
-    let stmt = db.prepare_v2("SELECT lower(hex(crsql_site_id()))")?;
-    stmt.step()?;
-    Ok(String::from(stmt.column_text(0)?))
-}
-
-/// Case 1 in-place extension: UPDATE existing row's content (concat `text`) and idx
-/// (bump by chars added). The row stays at the same parent, just covers a wider range.
-fn extend_run_in_place(
-    db: *mut sqlite3,
-    backing: &str,
-    row_pk: i64,
-    left: &NodeRef,
-    text: &str,
-) -> Result<(), String> {
-    let len_added = text.chars().count() as i32;
-    let new_idx = left.idx + len_added;
-    let sql = format!(
-        "UPDATE \"{}\" SET content = content || ?, idx = ? \
-         WHERE row_pk = ? AND itemId = ? AND idx = ?",
-        escape_ident(backing)
-    );
-    let stmt = db
-        .prepare_v2(&sql)
-        .map_err(|_| String::from("prepare case1 extend"))?;
-    stmt.bind_text(1, text, Destructor::TRANSIENT)
-        .map_err(|_| String::from("bind text"))?;
-    stmt.bind_int(2, new_idx)
-        .map_err(|_| String::from("bind new_idx"))?;
-    stmt.bind_int64(3, row_pk)
-        .map_err(|_| String::from("bind row_pk"))?;
-    stmt.bind_text(4, &left.item_id, Destructor::TRANSIENT)
-        .map_err(|_| String::from("bind itemId"))?;
-    stmt.bind_int(5, left.idx)
-        .map_err(|_| String::from("bind old idx"))?;
-    stmt.step().map_err(|_| String::from("case1 step"))?;
-    Ok(())
 }

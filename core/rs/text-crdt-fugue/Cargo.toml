@@ -22,3 +22,14 @@ panic = "abort"
 loadable_extension = ["sqlite_nostd/loadable_extension"]
 static = ["sqlite_nostd/static"]
 omit_load_extension = ["sqlite_nostd/omit_load_extension"]
+
+# Opt-in runtime invariant monitor. When enabled, the
+# `crsql_fugue_install_monitor()` SQL UDF becomes available; calling it
+# registers a sqlite3_preupdate_hook that panics on any backing-table row
+# mutation violating the Fugue immutability / tombstone-monotonicity invariants.
+# Off by default — release builds pay zero cost. The preupdate-hook FFI is
+# resolved dynamically via `dlsym(RTLD_DEFAULT, ...)` at install time, so the
+# extension itself still loads cleanly on hosts WITHOUT
+# SQLITE_ENABLE_PREUPDATE_HOOK — only `crsql_fugue_install_monitor()` fails
+# (with a clear error) on those hosts.
+debug-monitor = []

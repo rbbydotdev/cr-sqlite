@@ -33,3 +33,4 @@ static = [
 omit_load_extension = [
   "crsql_bundle/omit_load_extension"
 ]
+debug-monitor = ["crsql_bundle/debug-monitor"]

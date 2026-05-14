@@ -42,7 +42,9 @@ const rowCount = (db) =>
   const rows = rowCount(db);
   const rendered = render(db);
   console.log(`10K paste: ${dt.toFixed(1)}ms, ${rows} backing rows, rendered length ${rendered.length}`);
-  if (rows !== 1) console.warn(`note: expected 1 row, got ${rows} — Case 1 (extend) not implemented, so always-new-item`);
+  // 10K paste is a SINGLE crsql_fugue_insert call with `text` of length 10000.
+  // The Fugue path writes one backing row regardless of `text` length, so 1 row
+  // is the expected outcome — not a Case-1 in-place extension.
   if (rendered.length !== 10000) {
     console.error("FAIL: rendered length wrong");
     process.exit(1);

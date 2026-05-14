@@ -46,3 +46,7 @@ omit_load_extension = [
   "crsql_text_crdt_fugue/omit_load_extension",
   "crsql_core/omit_load_extension"
 ]
+# Forwards the text-CRDT crate's `debug-monitor` feature. Adds the
+# `crsql_fugue_install_monitor()` SQL UDF (an FFI hook into
+# sqlite3_preupdate_hook). Off by default.
+debug-monitor = ["crsql_text_crdt_fugue/debug-monitor"]
