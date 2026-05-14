@@ -44,11 +44,32 @@ use core::ffi::c_void;
 use sqlite_nostd as sqlite;
 use sqlite::{sqlite3, Connection, ResultCode};
 
+/// Single-marker cache entry: where the last successful insert landed.
+///
+/// `tail_item_id` / `tail_original_idx` identify the visible char at view
+/// position `cursor_view_position` — the LAST char of whatever was just
+/// inserted. The next call hits the fast path if it targets the position
+/// immediately after this marker (i.e. `position == cursor_view_position + 1`).
+///
+/// Field names are kept from the previous tail-only version to minimise
+/// surface change; the semantic shift is just "tail of doc" → "wherever the
+/// cursor ended up after the last write." Sequential typing at the end of
+/// the doc still works (the cursor IS the tail in that case); sequential
+/// typing mid-doc now also works (the cursor sits mid-doc, the fast path
+/// kicks in on the next keystroke at cursor+1).
 #[derive(Clone, Debug)]
 pub(crate) struct AppendCacheEntry {
     pub(crate) backing_version: i64,
     pub(crate) tail_item_id: String,
     pub(crate) tail_original_idx: i32,
+    /// View position (0-indexed) of the char at (tail_item_id, tail_original_idx).
+    /// The fast path matches when `position == cursor_view_position + 1`.
+    pub(crate) cursor_view_position: i32,
+    /// Total visible char count in the doc. Lets the fast path distinguish
+    /// "cursor at tail" (use `body || ?` — O(1) amortised) from "cursor mid-
+    /// content" (use `substr(body, 1, n) || ? || substr(body, n+1)` — O(N)
+    /// but stays in SQLite). Tail concat keeps sequential typing at the end
+    /// truly amortised constant.
     pub(crate) view_length: i32,
 }
 
@@ -120,25 +141,35 @@ pub(crate) fn read_version(
     }
 }
 
-/// Rebuild the cache entry for `(backing, row_pk)` from the current
-/// visible-chars walk. Called after slow-path inserts/deletes to leave the
-/// cache populated so the *next* append can use the fast path. Total cost
-/// is one extra O(N) walk, on top of the slow path's own O(N) work — so
-/// slow-path-followed-by-N-fast-path-appends is O(N) instead of O(N²).
+/// Rebuild the cache entry for `(backing, row_pk)` after a slow-path insert
+/// landed at view position `target_view_pos`. We walk visible chars once
+/// (O(N), one allocation), index to find the just-inserted char, and store
+/// it as the cursor marker. Sequential typing at that position now hits the
+/// fast path on every subsequent call.
+///
+/// `target_view_pos == None` means "use the doc tail" — used by paths that
+/// don't know where they wrote (or are confident the cursor IS at the tail).
 pub(crate) fn refresh_from_db(
     db: *mut sqlite3,
     backing: &str,
     row_pk: i64,
     cache: &ConnCache,
+    target_view_pos: Option<i32>,
 ) -> Result<(), String> {
     use crate::deletion;
     let nodes = deletion::load_nodes_pub(db, backing, row_pk)
         .map_err(|_| String::from("cache refresh: load_nodes"))?;
-    let summary = deletion::visible_summary(&nodes);
-    let Some((tail_id, tail_idx, count)) = summary else {
+    let visible = deletion::visible_chars(&nodes);
+    if visible.is_empty() {
         cache.invalidate(backing, row_pk);
         return Ok(());
+    }
+    let count = visible.len();
+    let target_idx = match target_view_pos {
+        Some(p) if p >= 0 && (p as usize) < count => p as usize,
+        _ => count - 1, // default to tail
     };
+    let marker = &visible[target_idx];
     let version = read_version(db, backing, row_pk)
         .map_err(|_| String::from("cache refresh: read_version"))?;
     cache.set(
@@ -146,8 +177,9 @@ pub(crate) fn refresh_from_db(
         row_pk,
         AppendCacheEntry {
             backing_version: version,
-            tail_item_id: tail_id,
-            tail_original_idx: tail_idx,
+            tail_item_id: marker.item_id.clone(),
+            tail_original_idx: marker.original_idx,
+            cursor_view_position: target_idx as i32,
             view_length: count as i32,
         },
     );

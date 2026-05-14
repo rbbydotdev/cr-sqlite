@@ -62,7 +62,13 @@ pub fn fugue_insert(
             if let Some(entry) = cache.get(&backing, row_pk) {
                 let current_version = crate::cache::read_version(db, &backing, row_pk)
                     .map_err(|_| String::from("cache: read_version"))?;
-                if current_version == entry.backing_version && position == entry.view_length {
+                // Fast path: the caller is inserting at the position
+                // *immediately after* our cached cursor marker. Covers both
+                // append-at-tail (cursor IS the tail) and sequential typing
+                // mid-content (cursor sits wherever the user typed last).
+                if current_version == entry.backing_version
+                    && position == entry.cursor_view_position + 1
+                {
                     let n = perform_append_fast_path(
                         db, table, column, &backing, row_pk, text, &entry, cache,
                     )?;
@@ -72,11 +78,20 @@ pub fn fugue_insert(
             }
         }
 
-        // Slow path: full visible-chars walk via perform_insert. Afterward,
-        // refresh the cache so the *next* append can take the fast path.
+        // Slow path. After it finishes, refresh the cache with the cursor
+        // pointing at the *last inserted char* (view position
+        // position + len(text) - 1) so subsequent sequential typing at that
+        // spot hits the fast path.
         let n = perform_insert(db, table, column, row_pk, position, text)?;
         if let Some(cache) = unsafe { crate::cache::cache_from_user_data(user_data) } {
-            crate::cache::refresh_from_db(db, &backing, row_pk, cache)?;
+            let target_view_pos = position + (text.chars().count() as i32) - 1;
+            crate::cache::refresh_from_db(
+                db,
+                &backing,
+                row_pk,
+                cache,
+                Some(target_view_pos),
+            )?;
         }
         Ok(n)
     });
@@ -99,13 +114,21 @@ pub fn fugue_insert(
     }
 }
 
-/// O(1) append at the end of the doc. Trusts the cache's tail pointer; the
-/// caller must have verified `position == cache.view_length` AND the cache's
-/// version snapshot matches the current backing version.
+/// Structural fast path. The cache's cursor marker tells us where the
+/// previous insert landed; the caller has already verified `position ==
+/// cursor_view_position + 1` AND the backing-version snapshot matches.
+/// We attach the new node directly to the cursor (O(1) write — no tree
+/// walk) and update the materialised parent column via a SQL string
+/// operation:
 ///
-/// Also updates the materialised parent column incrementally via SQL
-/// concatenation (`body = body || ?`), avoiding the O(N) tree-walk render
-/// the slow path uses. Total per-call cost stays O(1) amortised.
+/// - **Tail case** (`cursor_view_position == view_length - 1`, i.e.
+///   appending at the doc's end): `body = body || ?`. Amortised O(1).
+/// - **Mid-content case** (cursor sits inside the doc): `body =
+///   substr(body, 1, position) || ? || substr(body, position+1)`. O(N) in
+///   the body length but stays inside SQLite — no Rust render walk.
+///
+/// Both paths land at the correct final body; the split is just an
+/// optimisation for the common typing-at-tail case.
 fn perform_append_fast_path(
     db: *mut sqlite3,
     table: &str,
@@ -119,6 +142,8 @@ fn perform_append_fast_path(
     let new_item_id = fresh_item_id(db).map_err(|_| String::from("fast: fresh_item_id"))?;
     let new_text_len = text.chars().count() as i32;
     let new_idx = new_text_len - 1;
+    let insert_pos = entry.cursor_view_position + 1;
+    let at_tail = insert_pos == entry.view_length;
 
     insert_node(
         db,
@@ -133,24 +158,50 @@ fn perform_append_fast_path(
     )
     .map_err(|_| String::from("fast: insert_node"))?;
 
-    // Incrementally append to the materialised parent column. Cheap UPDATE
-    // with one string concat — same final state as the full render walker
-    // would produce, just without the walk.
     let parent_esc = crate::util::escape_ident(table);
     let col_esc = crate::util::escape_ident(column);
-    let append_sql = alloc::format!(
-        "UPDATE \"{parent}\" SET \"{col}\" = COALESCE(\"{col}\", '') || ? WHERE rowid = ?",
-        parent = parent_esc,
-        col = col_esc,
-    );
-    let stmt = db
-        .prepare_v2(&append_sql)
-        .map_err(|_| String::from("fast: prepare append"))?;
-    stmt.bind_text(1, text, sqlite::Destructor::TRANSIENT)
-        .map_err(|_| String::from("fast: bind text"))?;
-    stmt.bind_int64(2, row_pk)
-        .map_err(|_| String::from("fast: bind row_pk"))?;
-    stmt.step().map_err(|_| String::from("fast: step append"))?;
+
+    if at_tail {
+        // O(1) amortised concat at the end.
+        let append_sql = alloc::format!(
+            "UPDATE \"{parent}\" SET \"{col}\" = COALESCE(\"{col}\", '') || ? WHERE rowid = ?",
+            parent = parent_esc,
+            col = col_esc,
+        );
+        let stmt = db
+            .prepare_v2(&append_sql)
+            .map_err(|_| String::from("fast: prepare tail append"))?;
+        stmt.bind_text(1, text, sqlite::Destructor::TRANSIENT)
+            .map_err(|_| String::from("fast: bind text"))?;
+        stmt.bind_int64(2, row_pk)
+            .map_err(|_| String::from("fast: bind row_pk"))?;
+        stmt.step()
+            .map_err(|_| String::from("fast: step tail append"))?;
+    } else {
+        // Mid-content splice via substr. substr(body, 1, n) takes the first n
+        // chars; substr(body, n+1) takes from char n onwards (1-indexed,
+        // character-based for UTF-8 TEXT in SQLite).
+        let splice_sql = alloc::format!(
+            "UPDATE \"{parent}\" SET \"{col}\" = \
+             substr(COALESCE(\"{col}\", ''), 1, ?) || ? || substr(COALESCE(\"{col}\", ''), ?) \
+             WHERE rowid = ?",
+            parent = parent_esc,
+            col = col_esc,
+        );
+        let stmt = db
+            .prepare_v2(&splice_sql)
+            .map_err(|_| String::from("fast: prepare mid splice"))?;
+        stmt.bind_int(1, insert_pos)
+            .map_err(|_| String::from("fast: bind splice prefix-len"))?;
+        stmt.bind_text(2, text, sqlite::Destructor::TRANSIENT)
+            .map_err(|_| String::from("fast: bind splice text"))?;
+        stmt.bind_int(3, insert_pos + 1)
+            .map_err(|_| String::from("fast: bind splice suffix-start"))?;
+        stmt.bind_int64(4, row_pk)
+            .map_err(|_| String::from("fast: bind row_pk"))?;
+        stmt.step()
+            .map_err(|_| String::from("fast: step mid splice"))?;
+    }
 
     let new_version =
         crate::cache::read_version(db, backing, row_pk).unwrap_or(entry.backing_version + 1);
@@ -162,6 +213,9 @@ fn perform_append_fast_path(
             backing_version: new_version,
             tail_item_id: new_item_id,
             tail_original_idx: new_idx,
+            // Cursor advances by the length of the inserted text — it now
+            // sits at the LAST inserted char. View length grows by the same.
+            cursor_view_position: entry.cursor_view_position + new_text_len,
             view_length: entry.view_length + new_text_len,
         },
     );
