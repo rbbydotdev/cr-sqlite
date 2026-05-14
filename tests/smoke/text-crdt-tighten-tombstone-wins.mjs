@@ -168,13 +168,19 @@ function fail(msg, dbs) {
   const bBody = body(b);
   console.log(`A: ${JSON.stringify(aBody)} | B: ${JSON.stringify(bBody)}`);
   if (aBody !== bBody) fail(`scenario 3 diverged: A=${aBody} B=${bBody}`, [["a", a], ["b", b]]);
-  // Fugue-deterministic result (smaller-idx wins per position): "abchij".
-  // The "union of deletions" intuition would yield "abhij" but that's NOT what Fugue produces —
-  // peer A's tombstone of positions [2,5) only applies via row (Alice, 4) which gets trimmed
-  // to range [3,4] by cleanup's overlap with the kept "c" portion at idx=2.
-  if (aBody !== "abchij")
-    fail(`Fugue result drift: expected 'abchij', got ${JSON.stringify(aBody)}`, [["a", a]]);
-  console.log("ok: overlapping partial deletes converge to Fugue-deterministic result");
+  // β-flat: each peer's partial delete becomes a deletion-marker child of
+  // the original row, covering its own range. After sync, both markers are
+  // applied; the render hides the UNION of covered positions. A deleted [2,5)
+  // and B deleted [3,7) → union is [2,7) → "abhij" (cdefg removed).
+  //
+  // The pre-β-flat code produced "abchij" via the split-based trim mechanism,
+  // where peer A's tombstoned middle [2,5) got trimmed against peer B's kept
+  // "c" portion at idx=2. That's a specific quirk of the split implementation;
+  // β-flat treats deletion-intent as union, which matches user expectation
+  // (any peer's delete sticks).
+  if (aBody !== "abhij")
+    fail(`β-flat union semantics: expected 'abhij', got ${JSON.stringify(aBody)}`, [["a", a]]);
+  console.log("ok: overlapping partial deletes converge to β-flat union ('abhij')");
 }
 
 // Note on limits of "tombstone-wins":

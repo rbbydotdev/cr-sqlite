@@ -6,18 +6,27 @@ use sqlite_nostd as sqlite;
 
 use crate::util::{backing_table_name, escape_ident};
 
-/// SQL function `crsql_as_text_crdt(table, column [, eager])`:
+/// SQL function `crsql_as_text_crdt(table, column)`:
 ///
 ///   1. validate parent `table` is a CRR (has `{table}__crsql_clock`)
 ///   2. validate `column` exists on parent
 ///   3. CREATE backing table `__crsql_fugue_{table}_{column}` (Weidner schema, WITHOUT ROWID)
 ///   4. mark backing as CRR via `crsql_as_crr`
-///   5. if `eager` (default 0): no triggers — `fugue_insert/delete/cleanup` each render the
-///      parent column once at end of their function (defer mode, fewer renders per call).
-///      if `eager=1`: install AFTER INSERT/UPDATE/DELETE per-row render triggers that
-///      materialize the parent column on every backing-row mutation (more renders, useful
-///      when sync-apply paths bypass our fugue_* functions and you want body kept fresh
-///      without calling `crsql_fugue_flush(...)`).
+///   5. install AFTER INSERT/UPDATE/DELETE render triggers on the backing table
+///      so the materialized parent column stays in lockstep with the Fugue
+///      tree. Triggers are gated by an active-counter so local `fugue_insert/
+///      delete/cleanup` paths do their multi-row writes silently and emit a
+///      single explicit render at end-of-function. Sync-apply paths (cells
+///      arriving via `crsql_changes`) execute with the counter at zero, so
+///      triggers fire per-cell; clients must wrap apply in a SQL transaction
+///      so the per-cell intermediate `body` writes are uncommitted until the
+///      final correct render lands.
+///
+/// **Client contract:** wrap sync-apply (`INSERT INTO crsql_changes ...`) in a
+/// transaction. Per-cell trigger fires during apply are uncommitted within the
+/// transaction; external connections see only the final committed state.
+/// Without a wrapping transaction, observers may see brief intermediate body
+/// values during the cr-sqlite per-cell apply sequence.
 ///
 /// Idempotent — uses `IF NOT EXISTS` everywhere. Calling twice on the same pair is a no-op.
 pub fn as_text_crdt(
@@ -26,26 +35,26 @@ pub fn as_text_crdt(
     argv: *mut *mut sqlite::value,
 ) {
     let arg_slice = args!(argc, argv);
+    // Accept 2 args; for compatibility with earlier scripts that passed a 3rd
+    // `eager` flag we silently accept (and ignore) a third arg. The old eager
+    // mode was a vestigial option: under β-flat it produced identical body
+    // outputs to the default mode, just with duplicate trigger fires. Removed
+    // for a smaller API surface.
     if arg_slice.len() < 2 || arg_slice.len() > 3 {
-        ctx.result_error("crsql_as_text_crdt requires 2 or 3 args: (table, column [, eager])");
+        ctx.result_error("crsql_as_text_crdt requires 2 args: (table, column)");
         return;
     }
 
     let table = arg_slice[0].text();
     let column = arg_slice[1].text();
-    let eager = if arg_slice.len() == 3 {
-        arg_slice[2].int() != 0
-    } else {
-        false
-    };
     let db = ctx.db_handle();
 
-    if let Err(msg) = register(db, table, column, eager) {
+    if let Err(msg) = register(db, table, column) {
         ctx.result_error(&msg);
     }
 }
 
-fn register(db: *mut sqlite3, table: &str, column: &str, eager: bool) -> Result<(), String> {
+fn register(db: *mut sqlite3, table: &str, column: &str) -> Result<(), String> {
     // 1. parent must be a CRR
     if !is_crr(db, table).map_err(|_| String::from("failed to inspect sqlite_master"))? {
         return Err(format!(
@@ -111,27 +120,20 @@ fn register(db: *mut sqlite3, table: &str, column: &str, eager: bool) -> Result<
     db.exec_safe(&as_crr)
         .map_err(|_| format!("failed to mark {} as CRR", backing))?;
 
-    // 5. render strategy (transparent mode by default):
-    //    Default → AFTER INSERT/UPDATE/DELETE triggers WITH `WHEN active_counter=0` clause.
+    // 5. render strategy:
+    //    AFTER INSERT/UPDATE/DELETE triggers WITH `WHEN active_counter=0` clause.
     //      Sync-apply paths (cr-sqlite writing remote changes through crsql_changes):
     //        counter=0 → trigger fires → parent column auto-renders. No client work.
     //      Local fugue_*  paths (insertion/deletion/cleanup):
     //        function brackets its work with counter++/--. During its writes counter≥1
     //        so the per-row trigger fires-but-skips. At end-of-function the explicit
     //        rerender_parent_column call renders once. N-row writes → 1 render.
-    //    eager=1 (opt-in legacy): triggers installed WITHOUT the WHEN clause, so they
-    //      ALWAYS fire (no suppression). Slower for multi-row fugue calls (N triggers
-    //      + 1 explicit rerender), kept for callers who explicitly want eager-everywhere
-    //      semantics or for diagnostic comparison.
-    //    Note: commit-hook batching (one render per row_pk per tx instead of one
-    //    per fugue call) was considered and rejected — it would reintroduce mid-tx
-    //    stale reads, which transparent mode just fixed. Not pursuing.
     ensure_active_counter_table(db)?;
     // recursive_triggers stays ON so the render trigger's RECURSIVE CTE walks
     // its own re-fire safely under the counter-guarded WHEN clause.
     db.exec_safe("PRAGMA recursive_triggers = ON")
         .map_err(|_| String::from("failed to enable recursive_triggers"))?;
-    install_render_trigger(db, &backing, table, column, eager)?;
+    install_render_trigger(db, &backing, table, column)?;
     // #!~ Cleanup-on-apply (concurrent-split overlap trim) is the missing
     // piece for fuzz convergence. A pure-SQL trim trigger was prototyped but
     // proved too aggressive for delete+insert scenarios — needs more careful
@@ -236,7 +238,6 @@ fn install_render_trigger(
     backing: &str,
     parent_table: &str,
     parent_column: &str,
-    eager: bool,
 ) -> Result<(), String> {
     let backing_esc = escape_ident(backing);
     let parent_esc = escape_ident(parent_table);
@@ -259,17 +260,11 @@ fn install_render_trigger(
         pcol = parent_column.replace('\'', "''"),
     );
 
-    // Transparent mode (default): WHEN suppression clause skips the render while a
-    // fugue_* function is executing (counter>0). Sync-apply paths leave counter=0,
-    // so the trigger renders normally — no client responsibility for flushing.
-    //
-    // Eager mode (opt-in via 3rd arg): no WHEN clause, trigger always fires. Useful
-    // when callers want every backing-row mutation to render unconditionally.
-    let when_clause = if eager {
-        String::new()
-    } else {
-        String::from(" WHEN (SELECT counter FROM __crsql_fugue_active WHERE id=1) = 0")
-    };
+    // WHEN suppression clause skips the render while a fugue_* function is
+    // executing (counter>0). Sync-apply paths leave counter=0, so the trigger
+    // renders normally — no client responsibility for flushing.
+    let when_clause =
+        String::from(" WHEN (SELECT counter FROM __crsql_fugue_active WHERE id=1) = 0");
 
     let trig_ai = format!(
         "CREATE TRIGGER IF NOT EXISTS \"{backing}__render_ai\" \

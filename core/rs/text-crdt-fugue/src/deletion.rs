@@ -61,13 +61,13 @@ pub fn fugue_delete(
     }
 }
 
-struct Node {
-    item_id: String,
-    idx: i32,
-    content: Option<String>,
-    parent_item_id: String,
-    parent_idx: i32,
-    tombstoned: bool,
+pub(crate) struct Node {
+    pub(crate) item_id: String,
+    pub(crate) idx: i32,
+    pub(crate) content: Option<String>,
+    pub(crate) parent_item_id: String,
+    pub(crate) parent_idx: i32,
+    pub(crate) tombstoned: bool,
 }
 
 fn perform_delete(
@@ -83,14 +83,12 @@ fn perform_delete(
     let nodes = load_nodes(db, &backing, row_pk)
         .map_err(|_| format!("failed to load nodes for row_pk={}", row_pk))?;
 
-    // Build render order with cumulative offsets.
-    let visible = render_order_with_offsets(&nodes);
+    // β-flat deletion. Walk visible chars to map view positions [from, to)
+    // onto the (item_id, original_idx) pairs they came from — accounting for
+    // deletion markers from prior deletes (which shorten the visible text but
+    // leave the underlying rows intact).
+    let visible = visible_chars(&nodes);
 
-    // β-flat deletion: a partial delete inserts a single deletion-marker child
-    // (tombstoned, with the deleted text as content) instead of splitting the
-    // parent into L/M/R + UPDATEing the parent's content. The render walker
-    // hides the covered parent positions on read. The atomic-row invariant is
-    // preserved — the parent row's `content` cell is never UPDATEd.
     enum Op {
         WholeTombstone {
             item_id: String,
@@ -103,43 +101,93 @@ fn perform_delete(
         },
     }
 
+    // For each item_id with chars in the delete range, collect the set of
+    // original_idx values to be marked. After collecting, each item turns into
+    // either a WholeTombstone (every char of the row is in the range) or a
+    // DeletionMarker covering [min..max]. Mid-range gaps don't happen because
+    // a contiguous view range maps to contiguous original_idxes within each
+    // parent (the walk emits each row's chars in idx order, with children
+    // interleaved as separate rows that we don't touch via this marker).
+    let mut per_item: BTreeMap<String, Vec<i32>> = BTreeMap::new();
+    for (view_pos, vc) in visible.iter().enumerate() {
+        let view_i = view_pos as i32;
+        if view_i < from {
+            continue;
+        }
+        if view_i >= to {
+            break;
+        }
+        per_item
+            .entry(vc.item_id.clone())
+            .or_default()
+            .push(vc.original_idx);
+    }
+
+    // Look up each affected row's total content length so we can detect the
+    // "every char of the row is in the delete range" case → WholeTombstone.
+    let mut content_len_by_item: BTreeMap<String, usize> = BTreeMap::new();
+    let mut last_idx_by_item: BTreeMap<String, i32> = BTreeMap::new();
+    for n in &nodes {
+        if let Some(s) = &n.content {
+            let l = s.chars().count();
+            if l > 0 {
+                content_len_by_item.insert(n.item_id.clone(), l);
+                last_idx_by_item.insert(n.item_id.clone(), n.idx);
+            }
+        }
+    }
+
     let mut ops: Vec<Op> = Vec::new();
-
-    for entry in &visible {
-        let render_end = entry.render_start + entry.char_count;
-        if render_end <= from || entry.render_start >= to {
+    for (item_id, idxes) in per_item {
+        if idxes.is_empty() {
             continue;
         }
+        let row_len = match content_len_by_item.get(&item_id) {
+            Some(&n) => n,
+            None => continue,
+        };
+        let row_idx = match last_idx_by_item.get(&item_id) {
+            Some(&v) => v,
+            None => continue,
+        };
 
-        let local_from = (from - entry.render_start).max(0) as usize;
-        let local_to = ((to - entry.render_start) as usize).min(entry.char_count as usize);
-        if local_from >= local_to {
-            continue;
-        }
+        // Slice the deleted text out of the row's content for the marker payload.
+        let row_node = nodes
+            .iter()
+            .find(|n| n.item_id == item_id && Some(row_idx) == Some(n.idx))
+            .ok_or_else(|| String::from("internal: deletion target row not found"))?;
+        let row_content = row_node
+            .content
+            .as_ref()
+            .ok_or_else(|| String::from("internal: deletion target row missing content"))?;
+        let first_idx = row_idx - (row_len as i32) + 1;
 
-        let content_str = &entry.content;
-        let len = content_str.chars().count();
-        let chars_vec: Vec<char> = content_str.chars().collect();
-        let l_text: String = chars_vec.iter().take(local_from).collect();
-        let m_text: String = chars_vec.iter().skip(local_from).take(local_to - local_from).collect();
-        let r_text: String = chars_vec.iter().skip(local_to).collect();
+        let min_idx = *idxes.iter().min().unwrap();
+        let max_idx = *idxes.iter().max().unwrap();
+        let span_chars = (max_idx - min_idx + 1) as usize;
 
-        if l_text.is_empty() && r_text.is_empty() {
+        // If the delete covers every char of the row (and no other children are
+        // shielding intermediate positions from being part of the visible run),
+        // tombstone the whole row. Otherwise emit a span marker for [min..max].
+        if span_chars == row_len && idxes.len() == row_len {
             ops.push(Op::WholeTombstone {
-                item_id: entry.item_id.clone(),
-                idx: entry.idx,
+                item_id: item_id.clone(),
+                idx: row_idx,
             });
         } else {
-            // Partial delete: insert a marker that covers parent positions
-            //   [entry.idx - len + 1 + local_from, entry.idx - len + local_to]
-            // We anchor the marker by its `parent_idx` = LAST covered position;
-            // the render walker reconstructs the cover span from `content` length.
-            let cover_end_idx = entry.idx - (len as i32) + (local_to as i32);
+            let chars_vec: Vec<char> = row_content.chars().collect();
+            let start_offset = (min_idx - first_idx) as usize;
+            let end_offset = (max_idx - first_idx) as usize;
+            let deleted_text: String = chars_vec
+                .iter()
+                .skip(start_offset)
+                .take(end_offset - start_offset + 1)
+                .collect();
 
             ops.push(Op::DeletionMarker {
-                parent_item_id: entry.item_id.clone(),
-                cover_end_idx,
-                deleted_text: m_text,
+                parent_item_id: item_id.clone(),
+                cover_end_idx: max_idx,
+                deleted_text,
             });
         }
     }
@@ -189,69 +237,118 @@ fn perform_delete(
     Ok(writes)
 }
 
-struct VisibleEntry {
-    item_id: String,
-    idx: i32,
-    parent_item_id: String,
-    parent_idx: i32,
-    content: String,
-    char_count: i32,
-    render_start: i32,
+/// One visible character in the rendered text, with the row that owns it and
+/// its position in the owning row's idx-space. Per-char granularity is what
+/// lets the deletion logic map a view-position delete range back to the
+/// underlying (itemId, original_idx) targets — even when prior deletion
+/// markers have shortened the visible text.
+pub(crate) struct VisibleChar {
+    pub(crate) item_id: String,
+    /// Absolute idx in the owning row (parent's first_idx + offset).
+    pub(crate) original_idx: i32,
 }
 
-fn render_order_with_offsets(nodes: &[Node]) -> Vec<VisibleEntry> {
-    let mut children: BTreeMap<(String, i32), Vec<&Node>> = BTreeMap::new();
+pub(crate) const DELETION_MARKER_PREFIX: &str = "DM_";
+
+pub(crate) fn is_deletion_marker_node(item_id: &str, tombstoned: bool) -> bool {
+    tombstoned && item_id.starts_with(DELETION_MARKER_PREFIX)
+}
+
+fn is_deletion_marker(node: &Node) -> bool {
+    is_deletion_marker_node(&node.item_id, node.tombstoned)
+}
+
+/// Walk the Fugue tree producing one entry per visible char in render order.
+/// Mirrors render.rs::walk_node but emits per-char records instead of a string,
+/// so callers can resolve a view-position back to the (itemId, original_idx)
+/// pair to attach a deletion marker to.
+pub(crate) fn visible_chars(nodes: &[Node]) -> Vec<VisibleChar> {
+    let mut by_parent: BTreeMap<&str, Vec<&Node>> = BTreeMap::new();
     for n in nodes {
-        children
-            .entry((n.parent_item_id.clone(), n.parent_idx))
+        by_parent
+            .entry(n.parent_item_id.as_str())
             .or_default()
             .push(n);
     }
-    for v in children.values_mut() {
-        v.sort_by(|a, b| (a.item_id.as_str(), a.idx).cmp(&(b.item_id.as_str(), b.idx)));
+    for v in by_parent.values_mut() {
+        v.sort_by(|a, b| {
+            a.parent_idx
+                .cmp(&b.parent_idx)
+                .then_with(|| a.item_id.cmp(&b.item_id))
+                .then_with(|| a.idx.cmp(&b.idx))
+        });
     }
 
-    let mut out: Vec<VisibleEntry> = Vec::new();
-    let mut cursor: i32 = 0;
-    let mut stack: Vec<(String, i32)> = Vec::new();
-    stack.push((String::new(), -2));
-    walk(&children, &mut stack, &mut out, &mut cursor);
+    let mut out: Vec<VisibleChar> = Vec::new();
+    if let Some(roots) = by_parent.get("") {
+        for kid in roots.iter().filter(|r| r.parent_idx == -2) {
+            walk_chars(kid, &by_parent, &mut out);
+        }
+    }
     out
 }
 
-fn walk(
-    children: &BTreeMap<(String, i32), Vec<&Node>>,
-    stack: &mut Vec<(String, i32)>,
-    out: &mut Vec<VisibleEntry>,
-    cursor: &mut i32,
+fn walk_chars<'a>(
+    node: &'a Node,
+    by_parent: &BTreeMap<&'a str, Vec<&'a Node>>,
+    out: &mut Vec<VisibleChar>,
 ) {
-    let Some(top) = stack.last().cloned() else {
-        return;
+    let chars: Vec<char> = match &node.content {
+        Some(s) => s.chars().collect(),
+        None => Vec::new(),
     };
-    if let Some(kids) = children.get(&top) {
-        for kid in kids {
-            let is_sentinel = kid.idx == -1;
-            let is_tombstone = kid.content.is_none() || kid.tombstoned;
-            if !is_sentinel && !is_tombstone {
-                if let Some(s) = &kid.content {
-                    let chars = s.chars().count() as i32;
-                    if chars > 0 {
-                        out.push(VisibleEntry {
-                            item_id: kid.item_id.clone(),
-                            idx: kid.idx,
-                            parent_item_id: kid.parent_item_id.clone(),
-                            parent_idx: kid.parent_idx,
-                            content: s.clone(),
-                            char_count: chars,
-                            render_start: *cursor,
-                        });
-                        *cursor += chars;
+    let kids = by_parent.get(node.item_id.as_str());
+
+    if chars.is_empty() {
+        if let Some(kids_v) = kids {
+            for kid in kids_v.iter().filter(|k| k.parent_idx == node.idx) {
+                walk_chars(kid, by_parent, out);
+            }
+        }
+        return;
+    }
+
+    let n_chars = chars.len() as i32;
+    let first_idx = node.idx - n_chars + 1;
+
+    // Build the set of parent positions covered by any deletion-marker child.
+    let mut covered: alloc::collections::BTreeSet<i32> = alloc::collections::BTreeSet::new();
+    if let Some(kids_v) = kids {
+        for kid in kids_v.iter() {
+            if is_deletion_marker(kid)
+                && kid.parent_idx >= first_idx
+                && kid.parent_idx <= node.idx
+            {
+                let span_len = kid
+                    .content
+                    .as_ref()
+                    .map(|c| c.chars().count() as i32)
+                    .unwrap_or(0);
+                if span_len > 0 {
+                    let start = (kid.parent_idx - span_len + 1).max(first_idx);
+                    for p in start..=kid.parent_idx {
+                        covered.insert(p);
                     }
                 }
             }
-            stack.push((kid.item_id.clone(), kid.idx));
-            walk(children, stack, out, cursor);
-            stack.pop();
+        }
+    }
+
+    for offset in 0..n_chars {
+        let abs_idx = first_idx + offset;
+        if !node.tombstoned && node.idx != -1 && !covered.contains(&abs_idx) {
+            out.push(VisibleChar {
+                item_id: node.item_id.clone(),
+                original_idx: abs_idx,
+            });
+        }
+        if let Some(kids_v) = kids {
+            for kid in kids_v
+                .iter()
+                .filter(|k| k.parent_idx == abs_idx && !is_deletion_marker(k))
+            {
+                walk_chars(kid, by_parent, out);
+            }
         }
     }
 }
@@ -280,37 +377,6 @@ fn load_nodes(db: *mut sqlite3, backing: &str, row_pk: i64) -> Result<Vec<Node>,
         });
     }
     Ok(out)
-}
-
-fn update_content(
-    db: *mut sqlite3,
-    backing: &str,
-    row_pk: i64,
-    item_id: &str,
-    idx: i32,
-    content: Option<&str>,
-) -> Result<(), String> {
-    let sql = format!(
-        "UPDATE \"{}\" SET content = ? WHERE row_pk = ? AND itemId = ? AND idx = ?",
-        escape_ident(backing)
-    );
-    let stmt = db
-        .prepare_v2(&sql)
-        .map_err(|_| String::from("prepare update_content"))?;
-    match content {
-        Some(s) => stmt
-            .bind_text(1, s, Destructor::TRANSIENT)
-            .map_err(|_| String::from("bind content"))?,
-        None => stmt.bind_null(1).map_err(|_| String::from("bind NULL"))?,
-    };
-    stmt.bind_int64(2, row_pk)
-        .map_err(|_| String::from("bind row_pk"))?;
-    stmt.bind_text(3, item_id, Destructor::TRANSIENT)
-        .map_err(|_| String::from("bind item_id"))?;
-    stmt.bind_int(4, idx)
-        .map_err(|_| String::from("bind idx"))?;
-    stmt.step().map_err(|_| String::from("update_content step"))?;
-    Ok(())
 }
 
 fn insert_split_part(

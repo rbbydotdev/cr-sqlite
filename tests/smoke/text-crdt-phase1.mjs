@@ -93,19 +93,23 @@ if (!trigger.sql.includes("WHEN") || !trigger.sql.includes("__crsql_fugue_active
   fail(`transparent-mode trigger missing WHEN suppression clause:\n${trigger.sql}`);
 console.log("ok: transparent-mode trigger installed with suppression WHEN clause");
 
-// Verify eager mode installs the trigger WITHOUT the WHEN clause.
+// Eager mode was removed in β-flat — it produced identical outputs to the
+// default mode and only added duplicate trigger fires for local writes. The
+// `crsql_as_text_crdt` UDF now ignores a 3rd argument if passed, for
+// compatibility with older scripts. Verify that the (otherwise-ignored) 3rd
+// arg still doesn't change trigger behaviour: WHEN-suppression remains.
 db.exec("CREATE TABLE eager_notes (id INTEGER PRIMARY KEY NOT NULL, body TEXT)");
 db.prepare("SELECT crsql_as_crr('eager_notes')").get();
 db.prepare("SELECT crsql_as_text_crdt('eager_notes', 'body', 1)").get();
-const eagerTrigger = db
+const legacyTrigger = db
   .prepare(
     "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='__crsql_fugue_eager_notes_body__render_ai'",
   )
   .get();
-if (!eagerTrigger) fail("expected eager-mode trigger");
-if (eagerTrigger.sql.includes("WHEN"))
-  fail(`eager-mode trigger should NOT have WHEN clause:\n${eagerTrigger.sql}`);
-console.log("ok: eager-mode trigger installed without suppression");
+if (!legacyTrigger) fail("expected render trigger");
+if (!legacyTrigger.sql.includes("WHEN") || !legacyTrigger.sql.includes("__crsql_fugue_active"))
+  fail(`render trigger missing WHEN suppression clause:\n${legacyTrigger.sql}`);
+console.log("ok: legacy 3rd-arg accepted; trigger still suppression-gated");
 
 // Active-counter helper table exists (idempotent across registrations).
 const activeTable = db

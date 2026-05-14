@@ -93,7 +93,7 @@ fn perform_insert(
 
     // Load all backing rows for this row_pk. Row count grows with edits; the
     // full load is fine at current scales (see top-of-file note).
-    let mut nodes = load_nodes(db, &backing, row_pk)
+    let nodes = load_nodes(db, &backing, row_pk)
         .map_err(|_| format!("failed to load fugue nodes for row_pk={}", row_pk))?;
 
     // Walk to find neighbors. Mid-run is handled β-flat (no split — new insert
@@ -105,36 +105,13 @@ fn perform_insert(
         NeighborLookup::MidRun {
             entry_item_id,
             entry_idx,
-            split_offset,
-            parent_item_id: _,
-            parent_idx: _,
+            attachment_idx,
         } => {
             // β-flat: don't split the entry row. The new insert attaches at a
             // mid-content position via parentIdx pointing inside the entry's
-            // content range. The render walker interleaves children at their
-            // attachment positions. No cell-level UPDATE of `content` — the
-            // atomic-row invariant the TLA+ proof relies on.
-            //
-            // Compute the absolute position the new insert attaches AFTER. The
-            // entry's content covers absolute idx values
-            //   [entry_idx - len(content) + 1, entry_idx]
-            // and `split_offset` (1-indexed: number of chars in the left half)
-            // maps to attaching after absolute idx
-            //   first_idx + split_offset - 1
-            // i.e. between chars `split_offset - 1` and `split_offset` of the
-            // entry's content.
-            let entry = nodes
-                .iter()
-                .find(|n| n.item_id == entry_item_id && n.idx == entry_idx)
-                .ok_or_else(|| String::from("internal: mid-run entry not found"))?;
-            let content_len = entry
-                .content
-                .as_ref()
-                .map(|c| c.chars().count())
-                .unwrap_or(0) as i32;
-            let first_idx = entry_idx - content_len + 1;
-            let attachment_idx = first_idx + (split_offset as i32) - 1;
-
+            // content range. `attachment_idx` was already resolved against
+            // visible chars in find_neighbors_or_split, so deletion markers
+            // from prior partial deletes don't shift the position incorrectly.
             (
                 Some(NodeRef {
                     item_id: entry_item_id.clone(),
@@ -175,9 +152,12 @@ fn perform_insert(
             // Prepend: no left, right exists → Case 3.
             // Sentinel is a sibling of right (same parent), with right's itemId and idx=-1,
             // which sorts before right in (itemId, idx) order.
+            // Look up the row by item_id alone — under β-flat each itemId has a
+            // single row, and `rn.idx` may now point at a visible-char position
+            // (different from the row's full idx when markers cover the tail).
             let r_node = nodes
                 .iter()
-                .find(|n| n.item_id == rn.item_id && n.idx == rn.idx)
+                .find(|n| n.item_id == rn.item_id)
                 .ok_or_else(|| String::from("right neighbor row not found"))?;
             let sentinel_parent = NodeRef {
                 item_id: r_node.parent_item_id.clone(),
@@ -198,7 +178,7 @@ fn perform_insert(
                         // Case 3: sentinel under right's parent (rightItemId, -1).
                         let r_node = nodes
                             .iter()
-                            .find(|n| n.item_id == r.item_id && n.idx == r.idx)
+                            .find(|n| n.item_id == r.item_id)
                             .ok_or_else(|| String::from("right neighbor row not found"))?;
                         let sentinel_parent = NodeRef {
                             item_id: r_node.parent_item_id.clone(),
@@ -277,117 +257,108 @@ enum NeighborLookup {
     },
     MidRun {
         entry_item_id: String,
+        /// The row's last-char idx in original-item space (i.e. `entry.idx`).
         entry_idx: i32,
-        /// 0-based offset within the entry's content where the new content should land.
-        split_offset: usize,
-        parent_item_id: String,
-        parent_idx: i32,
+        /// Absolute idx in the entry's idx-space *after* which the new content
+        /// attaches (i.e. the `parent_idx` of the new row).
+        attachment_idx: i32,
     },
 }
 
+/// Marker-aware neighbor lookup.
+///
+/// Walks the Fugue tree's visible chars (mirrors deletion::visible_chars and
+/// render's walker — they all see the same view). For a view position P,
+/// classifies the insertion site as:
+///   - empty doc: Boundary { left: None, right: None }
+///   - at start (P == 0): Boundary { left: None, right: first visible char }
+///   - at end (P >= visible.len()): Boundary { left: last visible char, right: None }
+///   - between two adjacent chars of the same row: MidRun
+///   - between two chars in different rows (or across a marker gap): Boundary
+///
+/// NodeRef.idx in this β-flat scheme points at the original_idx of the
+/// visible char, not necessarily the row's last-char idx. That's exactly the
+/// `parent_idx` the new node will use to attach into the tree.
 fn find_neighbors_or_split(nodes: &[Node], position: i32) -> NeighborLookup {
-    use alloc::collections::BTreeMap;
-    let mut children: BTreeMap<(String, i32), Vec<&Node>> = BTreeMap::new();
-    for n in nodes {
-        children
-            .entry((n.parent_item_id.clone(), n.parent_idx))
-            .or_default()
-            .push(n);
-    }
-    for v in children.values_mut() {
-        v.sort_by(|a, b| (a.item_id.as_str(), a.idx).cmp(&(b.item_id.as_str(), b.idx)));
-    }
-
-    let mut visible: Vec<&Node> = Vec::new();
-    let mut stack: Vec<(String, i32)> = Vec::new();
-    stack.push((String::new(), -2));
-    walk_visible(&children, &mut stack, &mut visible);
-
-    let mut consumed = 0i32;
-    let mut left: Option<NodeRef> = None;
-    for n in &visible {
-        let len = n.content.as_ref().map(|s| s.chars().count() as i32).unwrap_or(0);
-        if consumed >= position {
-            return NeighborLookup::Boundary {
-                left,
-                right: Some(NodeRef {
-                    item_id: n.item_id.clone(),
-                    idx: n.idx,
-                }),
-            };
-        }
-        if consumed + len <= position {
-            // entirely before — current becomes left
-            left = Some(NodeRef {
-                item_id: n.item_id.clone(),
-                idx: n.idx,
-            });
-            consumed += len;
-            continue;
-        }
-        // position strictly inside this run: consumed < position < consumed + len
-        let split_offset = (position - consumed) as usize;
-        return NeighborLookup::MidRun {
-            entry_item_id: n.item_id.clone(),
-            entry_idx: n.idx,
-            split_offset,
+    // Convert insertion::Node to deletion::Node for the shared walker. Cheap
+    // — one allocation per insert call; row count is small at our scales.
+    let dn: Vec<crate::deletion::Node> = nodes
+        .iter()
+        .map(|n| crate::deletion::Node {
+            item_id: n.item_id.clone(),
+            idx: n.idx,
+            content: n.content.clone(),
             parent_item_id: n.parent_item_id.clone(),
             parent_idx: n.parent_idx,
+            tombstoned: n.tombstoned,
+        })
+        .collect();
+    let visible = crate::deletion::visible_chars(&dn);
+
+    let p = position.max(0) as usize;
+
+    if visible.is_empty() {
+        return NeighborLookup::Boundary {
+            left: None,
+            right: None,
         };
     }
-    // Walked past everything — position is at/past end of doc.
-    NeighborLookup::Boundary { left, right: None }
-}
 
-fn walk_visible<'a>(
-    children: &alloc::collections::BTreeMap<(String, i32), Vec<&'a Node>>,
-    stack: &mut Vec<(String, i32)>,
-    out: &mut Vec<&'a Node>,
-) {
-    let Some(top) = stack.last().cloned() else {
-        return;
-    };
-    if let Some(kids) = children.get(&top) {
-        for kid in kids {
-            let is_sentinel = kid.idx == -1;
-            // Both legacy NULL-content tombstones (pre-migration) and tombstoned=1 rows are invisible.
-            let is_tombstone = kid.content.is_none() || kid.tombstoned;
-            if !is_sentinel && !is_tombstone {
-                if let Some(s) = &kid.content {
-                    if !s.is_empty() {
-                        out.push(kid);
-                    }
-                }
-            }
-            stack.push((kid.item_id.clone(), kid.idx));
-            walk_visible(children, stack, out);
-            stack.pop();
-        }
+    if p == 0 {
+        let first = &visible[0];
+        return NeighborLookup::Boundary {
+            left: None,
+            right: Some(NodeRef {
+                item_id: first.item_id.clone(),
+                idx: first.original_idx,
+            }),
+        };
     }
-}
 
-fn update_row_content(
-    db: *mut sqlite3,
-    backing: &str,
-    row_pk: i64,
-    item_id: &str,
-    idx: i32,
-    content: Option<&str>,
-) -> Result<(), String> {
-    let sql = format!(
-        "UPDATE \"{}\" SET content = ? WHERE row_pk = ? AND itemId = ? AND idx = ?",
-        escape_ident(backing)
-    );
-    let stmt = db.prepare_v2(&sql).map_err(|_| String::from("prepare update"))?;
-    match content {
-        Some(s) => stmt.bind_text(1, s, Destructor::TRANSIENT).map_err(|_| String::from("bind content"))?,
-        None => stmt.bind_null(1).map_err(|_| String::from("bind NULL"))?,
-    };
-    stmt.bind_int64(2, row_pk).map_err(|_| String::from("bind row_pk"))?;
-    stmt.bind_text(3, item_id, Destructor::TRANSIENT).map_err(|_| String::from("bind itemId"))?;
-    stmt.bind_int(4, idx).map_err(|_| String::from("bind idx"))?;
-    stmt.step().map_err(|_| String::from("update step"))?;
-    Ok(())
+    if p >= visible.len() {
+        let last = &visible[visible.len() - 1];
+        return NeighborLookup::Boundary {
+            left: Some(NodeRef {
+                item_id: last.item_id.clone(),
+                idx: last.original_idx,
+            }),
+            right: None,
+        };
+    }
+
+    let left_vc = &visible[p - 1];
+    let right_vc = &visible[p];
+
+    // Same-row & adjacent in idx-space → MidRun. The "adjacent" check rejects
+    // pairs that look adjacent in view but actually have a marker-covered gap
+    // between them in original-idx space.
+    let same_row_adjacent = left_vc.item_id == right_vc.item_id
+        && right_vc.original_idx == left_vc.original_idx + 1;
+
+    if same_row_adjacent {
+        // Find the row's full idx so Case-3 sentinel placement works.
+        let row_idx = nodes
+            .iter()
+            .find(|n| n.item_id == left_vc.item_id)
+            .map(|n| n.idx)
+            .unwrap_or(left_vc.original_idx);
+        return NeighborLookup::MidRun {
+            entry_item_id: left_vc.item_id.clone(),
+            entry_idx: row_idx,
+            attachment_idx: left_vc.original_idx,
+        };
+    }
+
+    NeighborLookup::Boundary {
+        left: Some(NodeRef {
+            item_id: left_vc.item_id.clone(),
+            idx: left_vc.original_idx,
+        }),
+        right: Some(NodeRef {
+            item_id: right_vc.item_id.clone(),
+            idx: right_vc.original_idx,
+        }),
+    }
 }
 
 fn load_nodes(db: *mut sqlite3, backing: &str, row_pk: i64) -> Result<Vec<Node>, ResultCode> {
