@@ -123,6 +123,7 @@ version = "0.1.0"
 dependencies = [
  "crsql_core",
  "crsql_fractindex_core",
+ "crsql_text_crdt_fugue",
  "libc-print",
  "sqlite_nostd",
 ]
@@ -153,6 +154,13 @@ dependencies = [
  "cc",
  "crsql_bundle",
  "libc-print",
+ "sqlite_nostd",
+]
+
+[[package]]
+name = "crsql_text_crdt_fugue"
+version = "0.1.0"
+dependencies = [
  "sqlite_nostd",
 ]
 

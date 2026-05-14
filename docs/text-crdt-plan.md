@@ -193,6 +193,49 @@ The Hypothesis suite is the gate. If randomized merges find divergence, the algo
 - Compact-on-disk storage of position strings — Weidner's variant uses small ints, not strings, so this isn't a problem.
 - Yjs/Automerge interop — not needed; we own both ends of the wire.
 
-## Next action
+## Status — all phases complete (2026-05-14)
 
-Phase 0 scaffolding: create the empty `core/rs/text-crdt-fugue/` crate, wire it into the bundle, confirm the build stays green and all 271 tests still pass. That's the smallest unit of forward progress and unblocks every phase after.
+| Phase | Status | Outcome |
+|-------|--------|---------|
+| 0 — scaffold crate | ✅ | `core/rs/text-crdt-fugue/`, init wired into bundle, build green |
+| 1 — `crsql_as_text_crdt` | ✅ | Registration creates backing table (`WITHOUT ROWID`), parent index, AFTER INSERT/UPDATE/DELETE render triggers; idempotent; non-CRR & missing-column rejected |
+| 2 — insert (Fugue 3-case) | ✅ | Cases 2 + 3 implemented; mid-run inserts snap to nearest boundary (#!~) |
+| 3 — delete (tombstones) | ✅ | Whole-row tombstone + split (L/M/R with tombstoned middle); rerender wired |
+| 4 — multi-peer merge | ✅ | All 4 hand-crafted scenarios converge; concurrent SPLIT produces semantic duplication (acceptable — convergence is the gate; cleanup-pass is #!~ for follow-up) |
+| 5 — Hypothesis property tests | ✅ | 200 random 2-peer + 100 random 3-peer trials, **0 divergences**; bug found and fixed (end-of-doc with tombstone children) |
+| 6 — bulk + perf sanity | ✅ | 10K paste = 0.2ms / 1 row; 100 sequential keystrokes = 29ms; 1000 random-position inserts O(n²) (#!~ for follow-up — outside the gate) |
+| 7 — e2e sync integration | ✅ | Text-CRDT column flows through `crsql_changes`; divergent edits on text + LWW title converge; plain rows still sync |
+| 8 — finalize | ✅ | This update |
+
+**Test totals after all phases:** C 28/28, Python 246/246 (incl. 4 new Fugue tests with Hypothesis), 6 Node smoke scripts PASS.
+
+## Known tech-debt (`#!~` markers in source)
+
+### Correctness gaps (defer to a v2 cleanup pass)
+
+- **`insertion.rs:249`** — mid-run inserts snap to nearest run boundary instead of splitting the run mid-content. Convergence still holds but the rendered position may not match user intent for arbitrary positions inside a multi-character run.
+- **`deletion.rs:17`** — when splitting a sub-item that has children, the children all attach to the right portion (which keeps the original idx). Under concurrent merge this can leave children semantically mispositioned.
+- **`insertion.rs:23` + `text-crdt-phase4.mjs:185`** — concurrent SPLIT (Weidner's cleanup-pass scenario) converges but produces semantic duplication. Implementing tantaman's smallest-index trim algorithm would fix this. Not blocking sync correctness.
+
+### Perf (deferred, outside Phase 6 gates)
+
+- **`insertion.rs:1`** — each insert is O(n) (full node load + tree walk). 1000-op random-position session is ~100ms/op. Fix paths: render cache, indexed neighbor lookup, or Case-1 extension to keep n small.
+- **`insertion.rs:22`** — Case 1 (extend our own most-recent run in-place) is not implemented. Would halve row counts in long-lived docs.
+- **`insertion.rs:354`** — `itemId` uses `{site_hex}_{random_6_bytes}`. For ordering stability + Case-1 ownership checks, a monotonic counter is cleaner.
+- **`render.rs:17`** — `crsql_fugue_render` is the canonical reader; the materialized `notes.body` column is set by triggers but cascades through cr-sqlite as a tracked cell. Phase 5 caught this and tests use the render function. A separate non-CRR sidecar would let `SELECT body` work without cascade.
+
+### Schema/parent-shape limitations
+
+- **`registration.rs:57`** — parent table must have a single `INTEGER PRIMARY KEY NOT NULL` aliased to rowid. Compound or TEXT PKs need `row_pk` to be reshaped.
+- **`insertion.rs:160`** — end-of-doc inserts when the last visible node has tombstone children fall back to Case 2 (sibling of the tombstones). Sort order between the new node and the tombstone siblings is by item-id hex; semantically unstable but converges.
+
+## What this delivers
+
+A SQLite-resident text-CRDT column type, opt-in per parent column via `SELECT crsql_as_text_crdt('table', 'column')`, with these properties verified in 246 + 6 tests:
+
+1. Per-column text-CRDT semantics on a CRR — insertion + deletion at arbitrary positions
+2. N-peer convergence via cr-sqlite's existing `crsql_changes` protocol — no separate sync engine
+3. Native `.dylib` shipping; WASM rebuild still pending (task #8)
+4. Coexists with LWW, OR-Set, Fractional Index, and CausalLengthSet columns on the same parent
+
+WASM rebuild and the cleanup-pass for Weidner's concurrent-split case are the two largest remaining items, both deferred per #!~ markers.
