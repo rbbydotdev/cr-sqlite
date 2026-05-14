@@ -56,21 +56,32 @@ try {
   }
   const results = await page.evaluate(() => window.__BENCH_RESULTS__);
 
-  console.log("\nbenchmark results:");
-  console.log("─".repeat(72));
-  console.log("scenario".padEnd(38) + "time (ms)".padStart(12) + "rows".padStart(8) + "  note");
-  console.log("─".repeat(72));
+  console.log("\nbenchmark results (median of 3 runs):");
+  console.log("─".repeat(86));
+  console.log(
+    "scenario".padEnd(36) +
+      "median".padStart(10) +
+      "min".padStart(7) +
+      "max".padStart(7) +
+      "rows".padStart(8) +
+      "  note",
+  );
+  console.log("─".repeat(86));
   for (const r of results) {
     const dt = r.dt > 0 ? r.dt.toFixed(1) : "—";
+    const min = r.min !== undefined ? r.min.toFixed(0) : "—";
+    const max = r.max !== undefined ? r.max.toFixed(0) : "—";
     console.log(
-      r.name.slice(0, 38).padEnd(38) +
-        String(dt).padStart(12) +
+      r.name.slice(0, 36).padEnd(36) +
+        String(dt).padStart(10) +
+        String(min).padStart(7) +
+        String(max).padStart(7) +
         String(r.rows ?? "—").padStart(8) +
         "  " +
         (r.note ?? ""),
     );
   }
-  console.log("─".repeat(72));
+  console.log("─".repeat(86));
   const errors = results.filter((r) => /ERROR/.test(r.note ?? ""));
   if (errors.length > 0) {
     console.error(`\nERRORS: ${errors.length}`);

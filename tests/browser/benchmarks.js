@@ -131,6 +131,47 @@ async function benchDeletes(sqlite, n, opts) {
   return { rows: await rowCount(db), note: `${b.length} chars left` };
 }
 
+// --- Tombstone-stress scenarios for benchmarking coalescing optimization ---
+
+async function benchTypeBackspace(sqlite, n, opts) {
+  // Type n chars then backspace all n. Creates n adjacent tombstones.
+  const db = await open(sqlite, opts);
+  await ins(db, 0, "x".repeat(n));
+  for (let i = 0; i < n; i++) {
+    const len = (await body(db)).length;
+    if (len === 0) break;
+    await del(db, len - 1, len);
+  }
+  const b = await body(db);
+  return { rows: await rowCount(db), note: `${b.length} chars (should be 0)` };
+}
+
+async function benchBigRangeDelete(sqlite, size, opts) {
+  // Insert size chars, then delete the middle half in ONE op (vs many).
+  const db = await open(sqlite, opts);
+  await ins(db, 0, "x".repeat(size));
+  const len = (await body(db)).length;
+  await del(db, Math.floor(len / 4), Math.floor((3 * len) / 4));
+  const b = await body(db);
+  return { rows: await rowCount(db), note: `${b.length} chars left` };
+}
+
+async function benchEditChurn(sqlite, n, opts) {
+  // Insert + delete + insert in a tight cycle at random positions.
+  // Stresses cleanup + tombstone management.
+  const db = await open(sqlite, opts);
+  await ins(db, 0, "x".repeat(50));
+  for (let i = 0; i < n; i++) {
+    const len = (await body(db)).length;
+    if (len === 0) break;
+    const pos = Math.floor(Math.random() * len);
+    if (Math.random() < 0.5) await ins(db, pos, ".");
+    else await del(db, pos, Math.min(pos + 1, len));
+  }
+  const b = await body(db);
+  return { rows: await rowCount(db), note: `${b.length} chars after churn` };
+}
+
 async function bench2PeerSync(sqlite, opsPerPeer, opts) {
   const a = await open(sqlite, opts);
   const b = await open(sqlite, opts);
@@ -167,6 +208,28 @@ async function bench2PeerSync(sqlite, opsPerPeer, opts) {
   return { rows: await rowCount(a), note: `${bodyA.length} chars, converged` };
 }
 
+// Run a scenario N times, return median dt and min/max for noise visibility.
+async function benchN(name, fn, runs = 3) {
+  const dts = [];
+  let lastResult = null;
+  for (let i = 0; i < runs; i++) {
+    const t0 = performance.now();
+    lastResult = await fn();
+    const dt = performance.now() - t0;
+    dts.push(dt);
+  }
+  dts.sort((a, b) => a - b);
+  const median = dts[Math.floor(dts.length / 2)];
+  const min = dts[0];
+  const max = dts[dts.length - 1];
+  return { name, dt: median, min, max, rows: lastResult?.rows, note: lastResult?.note ?? "" };
+}
+
+function rowHtmlMulti(r) {
+  const range = r.min !== undefined ? `${r.min.toFixed(0)}–${r.max.toFixed(0)}` : "—";
+  return `<tr><td>${r.name}</td><td>${r.dt.toFixed(1)} ms</td><td>${range}</td><td>${r.rows ?? "—"}</td><td>${r.note ?? ""}</td></tr>`;
+}
+
 async function run() {
   $run.disabled = true;
   $results.innerHTML = "<p>initializing wasm…</p>";
@@ -174,8 +237,7 @@ async function run() {
     console.log("initializing wasm…");
     const sqlite = await initWasm((file) => `./dist/${file}`);
     console.log("wasm initialized");
-    // Side-by-side defer (default) vs eager (opt-in) scenarios.
-    // Each bench runs in both modes to measure the per-row-trigger overhead.
+    const RUNS = 3;
     const benches = [
       ["smoke sanity (defer)", () => smokeSanity(sqlite)],
       ["smoke sanity (eager)", () => smokeSanity(sqlite, { eager: true })],
@@ -187,27 +249,34 @@ async function run() {
       ["200 deletes (eager)", () => benchDeletes(sqlite, 200, { eager: true })],
       ["100 mid-run inserts (defer)", () => benchMidRun(sqlite, 100)],
       ["100 mid-run inserts (eager)", () => benchMidRun(sqlite, 100, { eager: true })],
+      ["type+backspace 100 (defer)", () => benchTypeBackspace(sqlite, 100)],
+      ["type+backspace 100 (eager)", () => benchTypeBackspace(sqlite, 100, { eager: true })],
+      ["1K big-range delete (defer)", () => benchBigRangeDelete(sqlite, 1000)],
+      ["1K big-range delete (eager)", () => benchBigRangeDelete(sqlite, 1000, { eager: true })],
+      ["100 churn ops (defer)", () => benchEditChurn(sqlite, 100)],
+      ["100 churn ops (eager)", () => benchEditChurn(sqlite, 100, { eager: true })],
       ["2-peer sync 50 ops (defer)", () => bench2PeerSync(sqlite, 50)],
       ["2-peer sync 50 ops (eager)", () => bench2PeerSync(sqlite, 50, { eager: true })],
     ];
     const results = [];
     for (const [name, fn] of benches) {
       try {
-        console.log(`running: ${name}`);
-        const r = await bench(name, fn);
-        console.log(`  → ${r.dt.toFixed(1)} ms / ${r.rows ?? "—"} rows / ${r.note}`);
+        console.log(`running: ${name} (×${RUNS})`);
+        const r = await benchN(name, fn, RUNS);
+        console.log(
+          `  → median ${r.dt.toFixed(1)} ms (range ${r.min.toFixed(0)}–${r.max.toFixed(0)}) / ${r.rows ?? "—"} rows / ${r.note}`,
+        );
         results.push(r);
       } catch (e) {
         console.log(`  → ERROR: ${e.message}`);
         results.push({ name, dt: 0, note: `ERROR: ${e.message}` });
       }
     }
-    let html = `<table><thead><tr><th>scenario</th><th>time</th><th>rows</th><th>note</th></tr></thead><tbody>`;
-    for (const r of results) html += rowHtml(r);
+    let html = `<table><thead><tr><th>scenario</th><th>median</th><th>min–max</th><th>rows</th><th>note</th></tr></thead><tbody>`;
+    for (const r of results) html += rowHtmlMulti(r);
     html += `</tbody></table>`;
     $results.innerHTML = html;
     setStatus("done", true);
-    // Expose results for Playwright to read
     window.__BENCH_RESULTS__ = results;
   } catch (e) {
     $results.innerHTML = `<pre class="err">${e.stack || e.message}</pre>`;

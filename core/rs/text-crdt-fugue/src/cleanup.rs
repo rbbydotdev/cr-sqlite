@@ -55,6 +55,7 @@ struct Node {
     item_id: String,
     idx: i32,
     content: Option<String>,
+    tombstoned: bool,
 }
 
 fn perform_cleanup(
@@ -141,12 +142,15 @@ fn perform_cleanup(
         }
     }
 
+    // After content trimming, coalesce adjacent tombstones for the same itemId.
+    coalesce_tombstones(db, &backing, row_pk)?;
+
     Ok(updates)
 }
 
 fn load_nodes(db: *mut sqlite3, backing: &str, row_pk: i64) -> Result<Vec<Node>, ResultCode> {
     let sql = format!(
-        "SELECT itemId, idx, content FROM \"{}\" WHERE row_pk = ?",
+        "SELECT itemId, idx, content, tombstoned FROM \"{}\" WHERE row_pk = ?",
         escape_ident(backing)
     );
     let stmt = db.prepare_v2(&sql)?;
@@ -161,9 +165,124 @@ fn load_nodes(db: *mut sqlite3, backing: &str, row_pk: i64) -> Result<Vec<Node>,
             } else {
                 Some(String::from(stmt.column_text(2)?))
             },
+            tombstoned: stmt.column_int(3) != 0,
         });
     }
     Ok(out)
+}
+
+/// Tombstone coalescing per Weidner: delete non-rightmost adjacent same-itemId tombstones
+/// (preserving any that have children). Reduces row count after typing-then-deleting
+/// patterns and after sync of concurrent deletes.
+///
+/// Called from fugue_delete (post-delete inline) and fugue_cleanup. Safe in both modes
+/// because we only delete rows that have no children — the rightmost tombstone retains
+/// the idx that any sibling/parent linkage would target.
+pub(crate) fn coalesce_tombstones(
+    db: *mut sqlite3,
+    backing: &str,
+    row_pk: i64,
+) -> Result<usize, String> {
+    let nodes = load_nodes(db, backing, row_pk)
+        .map_err(|_| format!("coalesce: failed to load nodes for row_pk={}", row_pk))?;
+
+    // Group tombstones by itemId. For each group, the rightmost (highest idx) stays;
+    // earlier siblings get queued for deletion if and only if they have no children.
+    let mut by_item: BTreeMap<String, Vec<&Node>> = BTreeMap::new();
+    for n in &nodes {
+        if n.tombstoned && n.idx >= 0 {
+            by_item.entry(n.item_id.clone()).or_default().push(n);
+        }
+    }
+
+    let mut to_delete: Vec<(String, i32)> = Vec::new();
+    for (item_id, mut items) in by_item {
+        if items.len() < 2 {
+            continue;
+        }
+        items.sort_by_key(|n| n.idx);
+        // Drop the rightmost — that one is kept.
+        let len = items.len();
+        for n in &items[..len - 1] {
+            // Skip if has children (Weidner's exception).
+            let has_kids = nodes.iter().any(|c| {
+                // Sentinels point at us, real children point at us — both count.
+                // (No-children means literally no row references this as parent.)
+                // We approximate via: any row with parent_item_id == n.item_id AND
+                //                              parent_idx == n.idx.
+                // The load_nodes Node struct above doesn't carry parent fields;
+                // we need the full row info. Inline a probe instead.
+                let _ = c;
+                false // placeholder; corrected below
+            });
+            if has_kids {
+                continue;
+            }
+            to_delete.push((item_id.clone(), n.idx));
+        }
+    }
+
+    if to_delete.is_empty() {
+        return Ok(0);
+    }
+
+    // Re-check has_children per candidate before deleting (the Node struct here lacks
+    // parent fields, so probe the table directly — cheap because tombstone-bearing
+    // itemIds are usually small).
+    let kids_sql = format!(
+        "SELECT count(*) FROM \"{}\" WHERE row_pk = ? AND parentItemId = ? AND parentIdx = ?",
+        escape_ident(backing)
+    );
+    let del_sql = format!(
+        "DELETE FROM \"{}\" WHERE row_pk = ? AND itemId = ? AND idx = ?",
+        escape_ident(backing)
+    );
+
+    let mut deleted = 0usize;
+    for (item_id, idx) in &to_delete {
+        // Has-children probe
+        let kids_stmt = db
+            .prepare_v2(&kids_sql)
+            .map_err(|_| String::from("coalesce: prepare kids probe"))?;
+        kids_stmt
+            .bind_int64(1, row_pk)
+            .map_err(|_| String::from("coalesce: bind row_pk"))?;
+        kids_stmt
+            .bind_text(2, item_id, Destructor::TRANSIENT)
+            .map_err(|_| String::from("coalesce: bind itemId"))?;
+        kids_stmt
+            .bind_int(3, *idx)
+            .map_err(|_| String::from("coalesce: bind idx"))?;
+        let has_kids = if kids_stmt.step().map_err(|_| String::from("kids step"))?
+            == ResultCode::ROW
+        {
+            kids_stmt.column_int(0) > 0
+        } else {
+            false
+        };
+        if has_kids {
+            continue;
+        }
+
+        let del_stmt = db
+            .prepare_v2(&del_sql)
+            .map_err(|_| String::from("coalesce: prepare delete"))?;
+        del_stmt
+            .bind_int64(1, row_pk)
+            .map_err(|_| String::from("coalesce: bind row_pk"))?;
+        del_stmt
+            .bind_text(2, item_id, Destructor::TRANSIENT)
+            .map_err(|_| String::from("coalesce: bind itemId"))?;
+        del_stmt
+            .bind_int(3, *idx)
+            .map_err(|_| String::from("coalesce: bind idx"))?;
+        del_stmt
+            .step()
+            .map_err(|_| String::from("coalesce: delete step"))?;
+        deleted += 1;
+    }
+
+    Ok(deleted)
 }
 
 fn update_row_content(

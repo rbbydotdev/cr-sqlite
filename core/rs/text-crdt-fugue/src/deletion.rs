@@ -42,15 +42,21 @@ pub fn fugue_delete(
     }
 
     let result = crate::active::with_active(db, || {
-        perform_delete(db, table, column, row_pk, from, to)
+        perform_delete(db, table, column, row_pk, from, to)?;
+        // Coalesce adjacent tombstones from this delete (and any prior deletes on
+        // the same itemId). Inline here so the explicit rerender below sees the
+        // coalesced state.
+        let backing = crate::util::backing_table_name(table, column);
+        crate::cleanup::coalesce_tombstones(db, &backing, row_pk)?;
+        Ok(())
     });
     match result {
-        Ok(n) => {
+        Ok(_) => {
             if let Err(msg) = crate::render::rerender_parent_column(db, table, column, row_pk) {
                 ctx.result_error(&msg);
                 return;
             }
-            ctx.result_int(n as i32);
+            ctx.result_int(0);
         }
         Err(msg) => ctx.result_error(&msg),
     }
