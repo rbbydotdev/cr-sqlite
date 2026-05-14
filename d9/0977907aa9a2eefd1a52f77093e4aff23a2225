@@ -1,0 +1,35 @@
+core/rs/text-crdt-fugue/src/cleanup.rs
+  s_3ac64368b6b350::t_44ccef157cb64e 1-188
+py/correctness/tests/test_fugue.py
+  s_3ac64368b6b350::t_f046346807e785 79-83,87-90
+tests/smoke/text-crdt-tighten-cleanup.mjs
+  s_3ac64368b6b350::t_47e53ab0a16bc0 1-126
+tests/smoke/text-crdt-tighten-mid-run.mjs
+  s_3ac64368b6b350::t_bef7953329bde2 1-81
+core/rs/text-crdt-fugue/src/insertion.rs
+  s_3ac64368b6b350::t_ba2a53c50558ca 274-395
+  s_3ac64368b6b350::t_68035508181b5d 83,86-158
+core/rs/text-crdt-fugue/src/lib.rs
+  s_3ac64368b6b350::t_580408e4282a37 7
+  s_3ac64368b6b350::t_85fc5fbfe89c29 119-131
+  s_3ac64368b6b350::t_5a1970dc8ac0fc 51-58
+docs/text-crdt-plan.md
+  s_3ac64368b6b350::t_77969da8cb457f 214,216-222
+  s_3ac64368b6b350::t_4cdd483ecf5f93 238,240,242-262,264
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "d90977907aa9a2eefd1a52f77093e4aff23a2225",
+  "prompts": {},
+  "sessions": {
+    "s_3ac64368b6b350": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f72c2aa-4f1e-4680-9b3b-9f9423c9e488",
+        "model": "unknown"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
