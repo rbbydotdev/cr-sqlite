@@ -1,0 +1,28 @@
+tests/smoke/probe_perf_mid_content_typing.mjs
+  s_3ac64368b6b350::t_bc272ee61fe800 1-104
+core/rs/text-crdt-fugue/src/cache.rs
+  s_3ac64368b6b350::t_8ebdfa669e3c8d 66,68-72
+  s_3ac64368b6b350::t_972371d2230b18 144-151,157,162-163,166-170,172,180-182
+  s_3ac64368b6b350::t_da966c67676792 47-59,65,67
+core/rs/text-crdt-fugue/src/insertion.rs
+  s_3ac64368b6b350::t_1f47281210c5b0 117-128,130-131,145-146,163-204
+  s_3ac64368b6b350::t_1651d94f8abd9a 65-71,81-84,87-94
+  s_3ac64368b6b350::t_c51bfde77b0e36 216,218
+  s_3ac64368b6b350::t_993cea73b376cb 217
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "9e115ba8f62654cf3035572735c4c9450b320400",
+  "prompts": {},
+  "sessions": {
+    "s_3ac64368b6b350": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f72c2aa-4f1e-4680-9b3b-9f9423c9e488",
+        "model": "unknown"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
