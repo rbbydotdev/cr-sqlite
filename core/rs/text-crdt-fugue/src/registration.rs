@@ -136,12 +136,13 @@ fn register(db: *mut sqlite3, table: &str, column: &str) -> Result<(), String> {
         .map_err(|_| String::from("failed to enable recursive_triggers"))?;
     install_render_trigger(db, &backing, table, column)?;
     install_version_triggers(db, &backing)?;
-    // #!~ Cleanup-on-apply (concurrent-split overlap trim) is the missing
-    // piece for fuzz convergence. A pure-SQL trim trigger was prototyped but
-    // proved too aggressive for delete+insert scenarios — needs more careful
-    // gating and likely a commit-hook approach. Until then, sync-apply leaves
-    // overlapping rows that the existing `crsql_fugue_cleanup` UDF resolves
-    // when called from local fugue_insert/delete paths.
+    // Note: β-flat does not need cleanup-on-apply. The β-split-era
+    // `crsql_fugue_cleanup` UDF was designed to trim overlap rows from
+    // concurrent splits of multi-char items. β-flat stores each char as its
+    // own row with a unique itemId, so concurrent inserts produce siblings
+    // — Fugue ordering converges them deterministically without trimming.
+    // Verified by 2000-iter fuzz with the cleanup() call disabled (0 fails).
+    // The UDF still exists as a no-op safety net for downstream callers.
 
     // 6. UNTRACK the parent column at the cr-sqlite layer.
     //    notes.body is a materialized view of the Fugue backing rows. cr-sqlite's

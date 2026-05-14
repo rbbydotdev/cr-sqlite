@@ -57,11 +57,6 @@ const render = (db) => db.prepare("SELECT crsql_fugue_render('notes','body',1)")
 const bodyCol = (db) => db.prepare("SELECT body FROM notes WHERE id=1").pluck().get();
 const insert = (db, pos, t) => db.prepare("SELECT crsql_fugue_insert('notes','body',1,?,?)").get(pos, t);
 const del = (db, from, to) => db.prepare("SELECT crsql_fugue_delete('notes','body',1,?,?)").get(from, to);
-// Cleanup-on-apply is not yet engine-side (see registration.rs #!~ marker).
-// The fuzz test calls it explicitly after sync converges so we can verify
-// the END STATE is canonical and consistent across peers. Once cleanup-on-
-// apply lands, this call can be removed and the same assertions should hold.
-const cleanup = (db) => db.prepare("SELECT crsql_fugue_cleanup('notes','body',1)").pluck().get();
 
 function pull(from, excludeSiteId) {
   return from
@@ -169,25 +164,11 @@ function fuzzIteration(seed) {
     return { seed, ok: false, reason: "sync did not stabilize in 20 passes (renders kept changing)", trace, renders: peers.map((p) => render(p.db)) };
   }
 
-  // Drive cleanup on each peer so concurrent-split overlaps converge to
-  // canonical state. Without this, the trigger's exact-idx CTE walks an
-  // over-counted tree on transient pre-cleanup states. Run cleanup +
-  // re-sync until stable so cleanup deltas propagate across peers.
-  for (let pass = 0; pass < 5; pass++) {
-    let changed = false;
-    for (const p of peers) {
-      const before = render(p.db);
-      cleanup(p.db);
-      if (render(p.db) !== before) changed = true;
-    }
-    // Cleanup writes generate new crsql_changes — sync them around.
-    for (let i = 0; i < nPeers; i++) {
-      for (let j = 0; j < nPeers; j++) {
-        if (i !== j) syncPair(peers[i], peers[j]);
-      }
-    }
-    if (!changed) break;
-  }
+  // β-flat converges purely via Fugue ordering — no engine-side cleanup
+  // needed (each char is its own atomic row with a unique itemId, so the
+  // β-split-era concurrent-split overlap simply can't form). The
+  // crsql_fugue_cleanup UDF still exists for legacy callers but is a no-op
+  // for this architecture; we used to run it here in a fixed-point loop.
 
   // Convergence checks.
   const renders = peers.map((p) => render(p.db));
