@@ -22,7 +22,9 @@ function setup(db) {
 }
 
 const siteId = (db) => db.prepare("SELECT crsql_site_id()").pluck().get();
-const body = (db) => db.prepare("SELECT body FROM notes WHERE id=1").get().body;
+// Defer-mode default: SELECT body would be stale after sync-apply (no per-row trigger).
+// Use crsql_fugue_render as the canonical reader.
+const body = (db) => db.prepare("SELECT crsql_fugue_render('notes','body',1)").pluck().get();
 const ins = (db, pos, t) =>
   db.prepare("SELECT crsql_fugue_insert('notes','body',1,?,?)").get(pos, t);
 const del = (db, from, to) =>

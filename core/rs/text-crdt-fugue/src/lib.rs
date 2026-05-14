@@ -56,6 +56,14 @@ pub extern "C" fn crsql_fugue_cleanup(
     cleanup::fugue_cleanup(ctx, argc, argv);
 }
 
+pub extern "C" fn crsql_fugue_flush(
+    ctx: *mut sqlite::context,
+    argc: i32,
+    argv: *mut *mut sqlite::value,
+) {
+    render::fugue_flush(ctx, argc, argv);
+}
+
 #[no_mangle]
 pub extern "C" fn sqlite3_crsqltextcrdtfugue_init(
     db: *mut sqlite::sqlite3,
@@ -63,19 +71,6 @@ pub extern "C" fn sqlite3_crsqltextcrdtfugue_init(
     api: *mut sqlite::api_routines,
 ) -> c_int {
     sqlite::EXTENSION_INIT2(api);
-
-    if let Err(rc) = db.create_function_v2(
-        "crsql_as_text_crdt",
-        2,
-        sqlite::UTF8 | sqlite::DIRECTONLY,
-        None,
-        Some(crsql_as_text_crdt),
-        None,
-        None,
-        None,
-    ) {
-        return rc as c_int;
-    }
 
     if let Err(rc) = db.create_function_v2(
         "crsql_fugue_insert",
@@ -122,6 +117,33 @@ pub extern "C" fn sqlite3_crsqltextcrdtfugue_init(
         sqlite::UTF8 | sqlite::DIRECTONLY,
         None,
         Some(crsql_fugue_cleanup),
+        None,
+        None,
+        None,
+    ) {
+        return rc as c_int;
+    }
+
+    if let Err(rc) = db.create_function_v2(
+        "crsql_fugue_flush",
+        3,
+        sqlite::UTF8 | sqlite::DIRECTONLY,
+        None,
+        Some(crsql_fugue_flush),
+        None,
+        None,
+        None,
+    ) {
+        return rc as c_int;
+    }
+
+    // Allow 2-or-3-arg crsql_as_text_crdt (eager flag optional)
+    if let Err(rc) = db.create_function_v2(
+        "crsql_as_text_crdt",
+        -1,
+        sqlite::UTF8 | sqlite::DIRECTONLY,
+        None,
+        Some(crsql_as_text_crdt),
         None,
         None,
         None,

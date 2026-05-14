@@ -132,6 +132,11 @@ fn perform_cleanup(
         }
     }
 
+    // Defer mode (default): no triggers fired during the cleanup UPDATEs above; rerender
+    // the parent column once here. Eager mode: triggers already kept body fresh — redundant
+    // but cheap.
+    crate::render::rerender_parent_column(db, table, column, row_pk)?;
+
     Ok(updates)
 }
 

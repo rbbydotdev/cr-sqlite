@@ -206,12 +206,9 @@ fn perform_delete(
         }
     }
 
-    // The render trigger on AFTER INSERT fires for each inserted split row.
-    // Whole-tombstone path does only UPDATE, which has no INSERT trigger.
-    // #!~ Phase 3: install AFTER UPDATE trigger so whole-tombstone deletes re-render.
-    //     For now, force a re-render via a no-op INSERT-then-DELETE or call directly.
-    //     Quickest fix: explicit render call below.
-    rerender_parent(db, table, column, row_pk)?;
+    // Defer mode (default): no per-row triggers; we render once here at end-of-function.
+    // Eager mode: triggers already kept body fresh; this call is redundant but harmless.
+    crate::render::rerender_parent_column(db, table, column, row_pk)?;
 
     Ok(writes)
 }
@@ -410,40 +407,4 @@ fn mark_tombstoned(
 }
 
 // (derive_middle_content removed — m_text now carried directly through the Op struct.)
-
-/// Force a re-render of the parent column. The AFTER INSERT trigger covers insertions but
-/// whole-tombstone deletes only UPDATE the existing row.
-///
-/// #!~ Phase 3: cleaner to install a matching AFTER UPDATE trigger on the backing table
-///     so any state change re-renders. For now we call this from the delete path explicitly.
-fn rerender_parent(db: *mut sqlite3, table: &str, column: &str, row_pk: i64) -> Result<(), String> {
-    let backing = backing_table_name(table, column);
-    let sql = format!(
-        "UPDATE \"{parent}\" SET \"{col}\" = (\
-            WITH RECURSIVE under_node(content, level, itemId, idx, tombstoned) AS (\
-                VALUES ('', 0, '', -2, 0) \
-                UNION ALL \
-                SELECT f.content, under_node.level + 1, f.itemId, f.idx, f.tombstoned \
-                FROM \"{backing}\" f \
-                JOIN under_node ON f.parentItemId = under_node.itemId AND f.parentIdx = under_node.idx \
-                WHERE f.row_pk = ? \
-                ORDER BY 2 DESC, f.itemId, f.idx \
-            ) \
-            SELECT IFNULL(group_concat(content, ''), '') FROM under_node \
-            WHERE idx != -1 AND tombstoned = 0 \
-         ) \
-         WHERE rowid = ?",
-        parent = escape_ident(table),
-        col = escape_ident(column),
-        backing = escape_ident(&backing)
-    );
-    let stmt = db
-        .prepare_v2(&sql)
-        .map_err(|_| String::from("prepare rerender"))?;
-    stmt.bind_int64(1, row_pk)
-        .map_err(|_| String::from("bind row_pk subquery"))?;
-    stmt.bind_int64(2, row_pk)
-        .map_err(|_| String::from("bind row_pk where"))?;
-    stmt.step().map_err(|_| String::from("rerender step"))?;
-    Ok(())
-}
+// (rerender_parent moved to render::rerender_parent_column for sharing across modules.)

@@ -26,11 +26,12 @@ function rowHtml(r) {
   return `<tr><td>${r.name}</td><td>${r.dt.toFixed(1)} ms</td><td>${r.rows ?? "—"}</td><td>${r.note ?? ""}</td></tr>`;
 }
 
-async function open(sqlite) {
+async function open(sqlite, { eager = false } = {}) {
   const db = await sqlite.open(":memory:");
   await db.exec("CREATE TABLE notes (id INTEGER PRIMARY KEY NOT NULL, body TEXT)");
   await db.exec("SELECT crsql_as_crr('notes')");
-  await db.exec("SELECT crsql_as_text_crdt('notes', 'body')");
+  // eager=0 (default) → defer; eager=1 → per-row triggers
+  await db.exec(`SELECT crsql_as_text_crdt('notes', 'body', ${eager ? 1 : 0})`);
   await db.exec("INSERT INTO notes (id, body) VALUES (1, '')");
   return db;
 }
@@ -81,8 +82,8 @@ async function bench(name, fn) {
   return { name, dt, ...out };
 }
 
-async function smokeSanity(sqlite) {
-  const db = await open(sqlite);
+async function smokeSanity(sqlite, opts) {
+  const db = await open(sqlite, opts);
   await ins(db, 0, "hello");
   await ins(db, 5, " world");
   const b = await body(db);
@@ -90,15 +91,15 @@ async function smokeSanity(sqlite) {
   return { rows: await rowCount(db), note: b };
 }
 
-async function benchAppends(sqlite, n) {
-  const db = await open(sqlite);
+async function benchAppends(sqlite, n, opts) {
+  const db = await open(sqlite, opts);
   for (let i = 0; i < n; i++) await ins(db, i, "x");
   const b = await body(db);
   return { rows: await rowCount(db), note: `${b.length} chars` };
 }
 
-async function benchMidRun(sqlite, n) {
-  const db = await open(sqlite);
+async function benchMidRun(sqlite, n, opts) {
+  const db = await open(sqlite, opts);
   await ins(db, 0, "x".repeat(200));
   for (let i = 0; i < n; i++) {
     const len = (await body(db)).length;
@@ -109,16 +110,16 @@ async function benchMidRun(sqlite, n) {
   return { rows: await rowCount(db), note: `${b.length} chars` };
 }
 
-async function benchPaste(sqlite, size) {
-  const db = await open(sqlite);
+async function benchPaste(sqlite, size, opts) {
+  const db = await open(sqlite, opts);
   await ins(db, 0, "x".repeat(size));
   const b = await body(db);
   const rows = await rowCount(db);
   return { rows, note: `${b.length} chars, ${rows} row(s)` };
 }
 
-async function benchDeletes(sqlite, n) {
-  const db = await open(sqlite);
+async function benchDeletes(sqlite, n, opts) {
+  const db = await open(sqlite, opts);
   await ins(db, 0, "x".repeat(n * 2));
   for (let i = 0; i < n; i++) {
     const len = (await body(db)).length;
@@ -130,9 +131,9 @@ async function benchDeletes(sqlite, n) {
   return { rows: await rowCount(db), note: `${b.length} chars left` };
 }
 
-async function bench2PeerSync(sqlite, opsPerPeer) {
-  const a = await open(sqlite);
-  const b = await open(sqlite);
+async function bench2PeerSync(sqlite, opsPerPeer, opts) {
+  const a = await open(sqlite, opts);
+  const b = await open(sqlite, opts);
   await ins(a, 0, "shared text");
   await apply(b, await pull(a, await siteId(b)));
   await cleanup(b);
@@ -173,13 +174,21 @@ async function run() {
     console.log("initializing wasm…");
     const sqlite = await initWasm((file) => `./dist/${file}`);
     console.log("wasm initialized");
+    // Side-by-side defer (default) vs eager (opt-in) scenarios.
+    // Each bench runs in both modes to measure the per-row-trigger overhead.
     const benches = [
-      ["smoke sanity (insert+append)", () => smokeSanity(sqlite)],
-      ["100 appends", () => benchAppends(sqlite, 100)],
-      ["10K-char single paste", () => benchPaste(sqlite, 10000)],
-      ["200 deletes", () => benchDeletes(sqlite, 200)],
-      ["100 mid-run inserts (O(n²))", () => benchMidRun(sqlite, 100)],
-      ["2-peer sync 50 ops each + cleanup", () => bench2PeerSync(sqlite, 50)],
+      ["smoke sanity (defer)", () => smokeSanity(sqlite)],
+      ["smoke sanity (eager)", () => smokeSanity(sqlite, { eager: true })],
+      ["100 appends (defer)", () => benchAppends(sqlite, 100)],
+      ["100 appends (eager)", () => benchAppends(sqlite, 100, { eager: true })],
+      ["10K paste (defer)", () => benchPaste(sqlite, 10000)],
+      ["10K paste (eager)", () => benchPaste(sqlite, 10000, { eager: true })],
+      ["200 deletes (defer)", () => benchDeletes(sqlite, 200)],
+      ["200 deletes (eager)", () => benchDeletes(sqlite, 200, { eager: true })],
+      ["100 mid-run inserts (defer)", () => benchMidRun(sqlite, 100)],
+      ["100 mid-run inserts (eager)", () => benchMidRun(sqlite, 100, { eager: true })],
+      ["2-peer sync 50 ops (defer)", () => bench2PeerSync(sqlite, 50)],
+      ["2-peer sync 50 ops (eager)", () => bench2PeerSync(sqlite, 50, { eager: true })],
     ];
     const results = [];
     for (const [name, fn] of benches) {

@@ -81,27 +81,43 @@ const idxExists = db
 if (idxExists.n !== 1) fail("parent index missing");
 console.log("ok: parent index exists");
 
-// 7. Render trigger exists
-const trgExists = db
+// 7. Default mode (defer): render trigger is NOT installed.
+//    Eager mode (opt-in) installs it. Verify both.
+const triggerCount = db
   .prepare(
     "SELECT count(*) AS n FROM sqlite_master WHERE type='trigger' AND name='__crsql_fugue_notes_body__render_ai'",
   )
-  .get();
-if (trgExists.n !== 1) fail("render trigger missing");
-console.log("ok: render trigger exists");
+  .get().n;
+if (triggerCount !== 0) fail(`expected 0 render triggers in defer mode, got ${triggerCount}`);
+console.log("ok: defer mode has no render trigger");
+
+// Verify eager mode installs the trigger.
+db.exec("CREATE TABLE eager_notes (id INTEGER PRIMARY KEY NOT NULL, body TEXT)");
+db.prepare("SELECT crsql_as_crr('eager_notes')").get();
+db.prepare("SELECT crsql_as_text_crdt('eager_notes', 'body', 1)").get();
+const eagerTrigger = db
+  .prepare(
+    "SELECT count(*) AS n FROM sqlite_master WHERE type='trigger' AND name='__crsql_fugue_eager_notes_body__render_ai'",
+  )
+  .get().n;
+if (eagerTrigger !== 1) fail(`expected 1 render trigger in eager mode, got ${eagerTrigger}`);
+console.log("ok: eager mode installs render trigger");
 
 // 8. Idempotent — second call is a no-op (no error)
 db.prepare("SELECT crsql_as_text_crdt('notes', 'body')").get();
 console.log("ok: idempotent");
 
-// 9. Manual insert into backing fires the render trigger and populates notes.body
+// 9. Manual insert into backing + crsql_fugue_flush populates notes.body (defer-mode path).
 db.exec("INSERT INTO notes (id, title, body) VALUES (1, 't', '')");
 db.prepare(
-  `INSERT INTO __crsql_fugue_notes_body (row_pk, itemId, idx, content, parentItemId, parentIdx)
-   VALUES (1, 'Alice', 4, 'Hey ', '', -2)`,
+  `INSERT INTO __crsql_fugue_notes_body (row_pk, itemId, idx, content, parentItemId, parentIdx, tombstoned)
+   VALUES (1, 'Alice', 4, 'Hey ', '', -2, 0)`,
 ).run();
+// In defer mode, manual INSERTs don't trigger a render. Flush explicitly.
+db.prepare("SELECT crsql_fugue_flush('notes','body',1)").get();
 const row = db.prepare("SELECT body FROM notes WHERE id = 1").get();
-if (row.body !== "Hey ") fail(`render trigger wrong: got ${JSON.stringify(row.body)} expected 'Hey '`);
-console.log("ok: render trigger materializes 'Hey '");
+if (row.body !== "Hey ")
+  fail(`flush wrong: got ${JSON.stringify(row.body)} expected 'Hey '`);
+console.log("ok: crsql_fugue_flush materializes 'Hey '");
 
 console.log("\nPASS: Phase 1 registration verified");

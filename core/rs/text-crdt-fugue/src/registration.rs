@@ -6,13 +6,18 @@ use sqlite_nostd as sqlite;
 
 use crate::util::{backing_table_name, escape_ident};
 
-/// SQL function `crsql_as_text_crdt(table, column)`:
+/// SQL function `crsql_as_text_crdt(table, column [, eager])`:
 ///
 ///   1. validate parent `table` is a CRR (has `{table}__crsql_clock`)
 ///   2. validate `column` exists on parent
 ///   3. CREATE backing table `__crsql_fugue_{table}_{column}` (Weidner schema, WITHOUT ROWID)
 ///   4. mark backing as CRR via `crsql_as_crr`
-///   5. install AFTER INSERT render trigger that materializes parent.column from backing rows
+///   5. if `eager` (default 0): no triggers — `fugue_insert/delete/cleanup` each render the
+///      parent column once at end of their function (defer mode, fewer renders per call).
+///      if `eager=1`: install AFTER INSERT/UPDATE/DELETE per-row render triggers that
+///      materialize the parent column on every backing-row mutation (more renders, useful
+///      when sync-apply paths bypass our fugue_* functions and you want body kept fresh
+///      without calling `crsql_fugue_flush(...)`).
 ///
 /// Idempotent — uses `IF NOT EXISTS` everywhere. Calling twice on the same pair is a no-op.
 pub fn as_text_crdt(
@@ -21,21 +26,26 @@ pub fn as_text_crdt(
     argv: *mut *mut sqlite::value,
 ) {
     let arg_slice = args!(argc, argv);
-    if arg_slice.len() != 2 {
-        ctx.result_error("crsql_as_text_crdt requires exactly 2 arguments: (table, column)");
+    if arg_slice.len() < 2 || arg_slice.len() > 3 {
+        ctx.result_error("crsql_as_text_crdt requires 2 or 3 args: (table, column [, eager])");
         return;
     }
 
     let table = arg_slice[0].text();
     let column = arg_slice[1].text();
+    let eager = if arg_slice.len() == 3 {
+        arg_slice[2].int() != 0
+    } else {
+        false
+    };
     let db = ctx.db_handle();
 
-    if let Err(msg) = register(db, table, column) {
+    if let Err(msg) = register(db, table, column, eager) {
         ctx.result_error(&msg);
     }
 }
 
-fn register(db: *mut sqlite3, table: &str, column: &str) -> Result<(), String> {
+fn register(db: *mut sqlite3, table: &str, column: &str, eager: bool) -> Result<(), String> {
     // 1. parent must be a CRR
     if !is_crr(db, table).map_err(|_| String::from("failed to inspect sqlite_master"))? {
         return Err(format!(
@@ -100,11 +110,17 @@ fn register(db: *mut sqlite3, table: &str, column: &str) -> Result<(), String> {
     db.exec_safe(&as_crr)
         .map_err(|_| format!("failed to mark {} as CRR", backing))?;
 
-    // 5. render trigger on INSERT into backing
-    //    Materializes parent.column via the Weidner recursive CTE.
-    //    #!~ Phase 3: extend to UPDATE/DELETE on backing too (tombstones)
-    //    #!~ Phase 6: move to COMMIT hook if profiling shows quadratic
-    install_render_trigger(db, &backing, table, column)?;
+    // 5. render strategy:
+    //    eager=1 → AFTER INSERT/UPDATE/DELETE triggers re-render on every row mutation
+    //    eager=0 (default, defer) → no per-row triggers; fugue_insert/delete/cleanup each
+    //      call render::rerender_parent_column once at function end. Sync-apply paths
+    //      that bypass fugue_* (e.g. INSERT INTO crsql_changes) leave the materialized
+    //      parent column stale until the next fugue_* call OR explicit crsql_fugue_flush.
+    //    #!~ commit-hook auto-flush — eliminates the "sync-apply leaves body stale" gap
+    //      without needing manual flush. Future optimization.
+    if eager {
+        install_render_trigger(db, &backing, table, column)?;
+    }
 
     Ok(())
 }

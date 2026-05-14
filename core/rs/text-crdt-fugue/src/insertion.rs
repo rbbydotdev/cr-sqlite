@@ -273,6 +273,11 @@ fn perform_insert(
     .map_err(|_| String::from("failed to insert new content row"))?;
     written += 1;
 
+    // Defer mode (default): per-row render triggers are not installed, so we render once
+    // at end of the function. Eager mode (opt-in): triggers have already kept body fresh
+    // during the inserts above; this final call is redundant but harmless.
+    crate::render::rerender_parent_column(db, table, column, row_pk)?;
+
     Ok(written + split_writes)
 }
 
