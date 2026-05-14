@@ -13,4 +13,3 @@ tsconfig.tsbuildinfo
 .turbo/
 target/
 py/correctness/.hypothesis/
-docs/
