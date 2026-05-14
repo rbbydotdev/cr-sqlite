@@ -1,0 +1,45 @@
+docs/text-crdt-plan.md
+  s_3ac64368b6b350::t_9405a86be25e08 219,221-228
+core/rs/text-crdt-fugue/src/render.rs
+  s_3ac64368b6b350::t_e75df650e41ae3 51-52,54,61
+core/rs/text-crdt-fugue/src/insertion.rs
+  s_3ac64368b6b350::t_69092696af4732 146
+  s_3ac64368b6b350::t_857651355faea7 69
+  s_3ac64368b6b350::t_c2af71c4325f1f 361-362
+  s_3ac64368b6b350::t_d0494d09aa7af4 403,421
+core/rs/text-crdt-fugue/src/registration.rs
+  s_3ac64368b6b350::t_ef78e4ded94f85 66-69,78
+  s_3ac64368b6b350::t_102ac9dfafc4ce 145-146,149-150,152,159
+tests/smoke/text-crdt-tighten-tombstone-wins.mjs
+  s_3ac64368b6b350::t_9ad56a40deb4f3 94-106,112,115-119,121-124,132-141
+  s_3ac64368b6b350::t_3ebef30b22036a 1-93,107-111,113-114,120,125-131,142-143,147-165,173-174,182
+  s_3ac64368b6b350::t_ed66883bb6b8f4 144-146,166-172,175-180
+  s_3ac64368b6b350::t_45864765ceb48a 181
+core/rs/text-crdt-fugue/src/deletion.rs
+  s_3ac64368b6b350::t_3b9e958685adb1 89
+  s_3ac64368b6b350::t_d5af4fce87bced 412
+  s_3ac64368b6b350::t_67465c7a534aa9 149-151,167,180,186-187,201
+  s_3ac64368b6b350::t_b2569673628323 288,306
+  s_3ac64368b6b350::t_cb825f025c9511 110-113,139
+  s_3ac64368b6b350::t_aff7dcc9f8e668 423-424,426,433
+  s_3ac64368b6b350::t_b0b1b3527bd99c 56
+  s_3ac64368b6b350::t_a895201a4fa64f 162,169-170,177
+  s_3ac64368b6b350::t_25e23ad8dc9fb8 261
+  s_3ac64368b6b350::t_732ad2f0ca3084 352,355-356,378-379,385-411
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "b2f191dc1cb598abd9d2e3c942355c14141b2ad8",
+  "prompts": {},
+  "sessions": {
+    "s_3ac64368b6b350": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f72c2aa-4f1e-4680-9b3b-9f9423c9e488",
+        "model": "unknown"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
