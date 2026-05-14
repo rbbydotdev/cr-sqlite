@@ -99,10 +99,15 @@ pub extern "C" fn sqlite3_crsqltextcrdtfugue_init(
         return rc as c_int;
     }
 
+    // INNOCUOUS so the auto-render trigger can call it under trusted_schema=OFF.
+    // NOT DETERMINISTIC — the function reads mutable backing rows, and the
+    // DETERMINISTIC flag let SQLite hoist/cache the call inside the trigger's
+    // UPDATE expression, which conflicted with cr-sqlite's apply transaction
+    // and surfaced as a spurious "SQL logic error" on sync-apply.
     if let Err(rc) = db.create_function_v2(
         "crsql_fugue_render",
         3,
-        sqlite::UTF8 | sqlite::DETERMINISTIC | sqlite::INNOCUOUS,
+        sqlite::UTF8 | sqlite::INNOCUOUS,
         None,
         Some(crsql_fugue_render),
         None,

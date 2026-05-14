@@ -415,7 +415,7 @@ fn walk_visible<'a>(
     }
 }
 
-fn update_row_content(
+pub(crate) fn update_row_content(
     db: *mut sqlite3,
     backing: &str,
     row_pk: i64,
@@ -471,7 +471,7 @@ fn has_children(nodes: &[Node], parent: &NodeRef) -> bool {
         .any(|n| n.parent_item_id == parent.item_id && n.parent_idx == parent.idx)
 }
 
-fn insert_node(
+pub(crate) fn insert_node(
     db: *mut sqlite3,
     backing: &str,
     row_pk: i64,

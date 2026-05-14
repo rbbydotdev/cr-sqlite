@@ -128,6 +128,7 @@ fn register(db: *mut sqlite3, table: &str, column: &str, eager: bool) -> Result<
     //    stale reads, which transparent mode just fixed. Not pursuing.
     ensure_active_counter_table(db)?;
     install_render_trigger(db, &backing, table, column, eager)?;
+    install_split_trigger(db, &backing, table, column)?;
 
     // 6. UNTRACK the parent column at the cr-sqlite layer.
     //    notes.body is a materialized view of the Fugue backing rows. cr-sqlite's
@@ -232,7 +233,10 @@ fn install_render_trigger(
     let parent_esc = escape_ident(parent_table);
     let col_esc = escape_ident(parent_column);
 
-    // Render filter: include if not a sentinel (idx != -1) AND not tombstoned.
+    // Simple exact-idx tree walk. Correctness depends on the apply-time
+    // splitter restoring the `child.parentIdx = parent.idx` invariant — see
+    // `apply_split.rs`. With that invariant, a child always references a
+    // parent's terminal idx, so the recursive join is sufficient.
     let render_body = format!(
         "UPDATE \"{parent}\" SET \"{col}\" = (\
             WITH RECURSIVE under_node(content, level, itemId, idx, tombstoned) AS (\
@@ -294,6 +298,272 @@ fn install_render_trigger(
     );
     db.exec_safe(&trig_ad)
         .map_err(|_| format!("failed to install AFTER DELETE trigger on {}", backing))?;
+
+    Ok(())
+}
+
+/// Apply-time split triggers — see `apply_split.rs` for the rationale.
+///
+/// We watch for the moment a backing row has both `parentItemId` and `parentIdx`
+/// set (cr-sqlite delivers cells one at a time on sync-apply, so the row only
+/// becomes "linkable" after both have arrived). Each trigger fires the splitter
+/// UDF, which is idempotent — repeated calls for the same row are O(1) lookups
+/// once the parent has already been split.
+///
+/// Gated by `__crsql_fugue_active.counter = 0` so:
+///   - Local fugue_* paths (which manipulate the backing table inside an active
+///     bracket) don't re-enter the splitter — they handle mid-run split locally
+///     via the existing `insertion.rs` Path-A logic.
+///   - The splitter's own writes (a shorten + an insert) don't recurse into
+///     itself; the splitter wraps its mutations in `with_active`.
+fn install_split_trigger(
+    db: *mut sqlite3,
+    backing: &str,
+    parent_table: &str,
+    parent_column: &str,
+) -> Result<(), String> {
+    let backing_esc = escape_ident(backing);
+    let parent_esc = escape_ident(parent_table);
+    let col_esc = escape_ident(parent_column);
+
+    // Pure-SQL split — no UDF call. Calling a UDF from a trigger that fires
+    // during cr-sqlite's apply path errors with SQL_LOGIC_ERROR (the merge
+    // vtable holds an outer cursor on the backing table and a UDF opening its
+    // own prepare_v2 statement collides). Inlining the split as SQL DML
+    // statements inside the trigger body works because the existing render
+    // trigger already does this pattern with its recursive CTE.
+    //
+    // The body shape:
+    //   1. Bump __crsql_fugue_active.counter so render + split triggers see
+    //      counter>0 and skip during our own writes (otherwise the new row's
+    //      AFTER INSERT would fire the split trigger again).
+    //   2. INSERT a LEFT-HALF row (same itemId, new idx=NEW.parentIdx) by
+    //      copying the parent's grandparent linkage. The condition restricts
+    //      to a parent whose stored idx is strictly greater than NEW.parentIdx
+    //      AND whose run actually covers NEW.parentIdx (i.e.
+    //      idx - length(content) + 1 <= NEW.parentIdx).
+    //   3. UPDATE the existing parent row to its RIGHT half (drop the left
+    //      portion from content). The original idx stays — children pinned
+    //      at the original idx are unaffected.
+    //   4. Restore the counter.
+    //
+    // Idempotency: after a successful split the parent row's first-char idx
+    // shifts past NEW.parentIdx, so the WHERE clauses no longer match. Repeat
+    // invocations no-op.
+    //
+    // The substr math: position-in-content of NEW.parentIdx is
+    // `NEW.parentIdx - first_idx + 1` where `first_idx = idx - length(content) + 1`.
+    // That simplifies to `NEW.parentIdx - idx + length(content)`, which is the
+    // length of the LEFT half.
+    // The NOT EXISTS guard avoids a PK conflict in the concurrent-split case:
+    // peer A's local split produced (itemId=X, idx=2) "Hey" and peer B's local
+    // split produced (itemId=X, idx=3) "Hey ". On sync, both rows exist on the
+    // target. When a child arrives with parentIdx=2, our splitter would try
+    // shrinking the idx=3 row to idx=2 — but the idx=2 row already exists, and
+    // it's already a valid parent for parentIdx=2. So we skip the split when
+    // a row at the exact target (itemId, parentIdx) is already present.
+    //
+    // The cleanup pass in insertion.rs is responsible for deduplicating the
+    // overlapping rows once both are visible; we just need to not crash here.
+    // Body is statement-sequence, no inter-statement guarding needed because
+    // the trigger's WHEN clause has already verified:
+    //   (1) a splittable parent run exists (idx > parentIdx, run covers parentIdx)
+    //   (2) no row at (itemId, parentIdx) already exists
+    //
+    // After the split, we inline an explicit render UPDATE to refresh the
+    // materialized parent column. The normal render trigger DID fire earlier
+    // (when cr-sqlite UPDATEd the child's parentIdx) but ran BEFORE the split,
+    // so its output reflected the pre-split tree and missed the child. The
+    // splitter's own backing-table writes happen with counter>0, suppressing
+    // the render trigger from re-running on them. So we render here, with the
+    // counter restored to 0 first, using the same CTE as the trigger body.
+    let render_sql = format!(
+        "UPDATE \"{parent}\" SET \"{col}\" = (\
+            WITH RECURSIVE under_node(content, level, itemId, idx, tombstoned) AS (\
+                VALUES ('', 0, '', -2, 0) \
+                UNION ALL \
+                SELECT f.content, under_node.level + 1, f.itemId, f.idx, f.tombstoned \
+                FROM \"{backing}\" f \
+                JOIN under_node ON f.parentItemId = under_node.itemId AND f.parentIdx = under_node.idx \
+                WHERE f.row_pk = NEW.row_pk \
+                ORDER BY 2 DESC, f.itemId, f.idx \
+            ) \
+            SELECT IFNULL(group_concat(content, ''), '') FROM under_node \
+            WHERE idx != -1 AND tombstoned = 0 \
+        ) WHERE rowid = NEW.row_pk",
+        parent = parent_esc,
+        col = col_esc,
+        backing = backing_esc,
+    );
+
+    let split_body = format!(
+        "UPDATE __crsql_fugue_active SET counter = counter + 1 WHERE id = 1; \
+         INSERT INTO \"{backing}\" (row_pk, itemId, idx, content, parentItemId, parentIdx, tombstoned) \
+           SELECT row_pk, itemId, NEW.parentIdx, \
+                  substr(content, 1, NEW.parentIdx - idx + length(content)), \
+                  parentItemId, parentIdx, tombstoned \
+             FROM \"{backing}\" \
+             WHERE row_pk = NEW.row_pk \
+               AND itemId = NEW.parentItemId \
+               AND idx > NEW.parentIdx \
+               AND (idx - length(content) + 1) <= NEW.parentIdx; \
+         UPDATE \"{backing}\" \
+           SET content = substr(content, NEW.parentIdx - idx + length(content) + 1) \
+           WHERE row_pk = NEW.row_pk \
+             AND itemId = NEW.parentItemId \
+             AND idx > NEW.parentIdx \
+             AND (idx - length(content) + 1) <= NEW.parentIdx; \
+         UPDATE __crsql_fugue_active SET counter = counter - 1 WHERE id = 1; \
+         {render}",
+        backing = backing_esc,
+        render = render_sql,
+    );
+
+    let when_clause = format!(
+        " WHEN NEW.idx != -1 \
+            AND NEW.parentItemId IS NOT NULL AND NEW.parentItemId != '' \
+            AND NEW.parentIdx IS NOT NULL AND NEW.parentIdx >= 0 \
+            AND (SELECT counter FROM __crsql_fugue_active WHERE id=1) = 0 \
+            AND NOT EXISTS ( \
+              SELECT 1 FROM \"{backing}\" \
+               WHERE row_pk = NEW.row_pk AND itemId = NEW.parentItemId AND idx = NEW.parentIdx \
+            ) \
+            AND EXISTS ( \
+              SELECT 1 FROM \"{backing}\" \
+               WHERE row_pk = NEW.row_pk AND itemId = NEW.parentItemId \
+                 AND idx > NEW.parentIdx \
+                 AND (idx - length(content) + 1) <= NEW.parentIdx \
+            )",
+        backing = backing_esc,
+    );
+    let when_clause = when_clause.as_str();
+
+    // AFTER INSERT — catches the case where parentItemId/parentIdx are present
+    // in the very first cell write (rare but possible).
+    let trig_split_ai = format!(
+        "CREATE TRIGGER IF NOT EXISTS \"{backing}__split_ai\" \
+         AFTER INSERT ON \"{backing}\"{when} BEGIN {body}; END",
+        backing = backing_esc,
+        when = when_clause,
+        body = split_body,
+    );
+    db.exec_safe(&trig_split_ai)
+        .map_err(|_| format!("failed to install split AFTER INSERT trigger on {}", backing))?;
+
+    // AFTER UPDATE OF parentIdx / parentItemId — catches the common case where
+    // cr-sqlite's per-cell apply sets these one at a time.
+    let trig_split_au_pidx = format!(
+        "CREATE TRIGGER IF NOT EXISTS \"{backing}__split_au_pidx\" \
+         AFTER UPDATE OF parentIdx ON \"{backing}\"{when} BEGIN {body}; END",
+        backing = backing_esc,
+        when = when_clause,
+        body = split_body,
+    );
+    db.exec_safe(&trig_split_au_pidx)
+        .map_err(|_| format!("failed to install split AFTER UPDATE-parentIdx trigger on {}", backing))?;
+
+    let trig_split_au_pitem = format!(
+        "CREATE TRIGGER IF NOT EXISTS \"{backing}__split_au_pitem\" \
+         AFTER UPDATE OF parentItemId ON \"{backing}\"{when} BEGIN {body}; END",
+        backing = backing_esc,
+        when = when_clause,
+        body = split_body,
+    );
+    db.exec_safe(&trig_split_au_pitem)
+        .map_err(|_| format!("failed to install split AFTER UPDATE-parentItemId trigger on {}", backing))?;
+
+    // Orphan-resolution triggers: fire from the PARENT row's perspective. When
+    // a row arrives (or its content changes) and any local child has parentIdx
+    // that falls inside the row's run, split the row at the SMALLEST such
+    // parentIdx. Subsequent orphans (if any) are resolved by recursive trigger
+    // fires: the body UPDATE-touches the (possibly shortened) row to retrigger.
+    //
+    // Why this case exists: when peer A locally Case-1-extends a run (idx
+    // bumps from 11 to 29), cr-sqlite ships the change as a row replacement
+    // (DELETE old idx=11 + INSERT new idx=29). On peer B, the local child at
+    // parentIdx=11 is suddenly orphaned because its parent row was replaced.
+    // The child-side trigger (split_au_*) doesn't help here — the child wasn't
+    // touched, only the parent was. This parent-side trigger catches it.
+    // Order matters: UPDATE NEW's row to its right-half content FIRST, then
+    // INSERT the left-half row. If we INSERTed first, the new row at the
+    // orphan parentIdx would cause the UPDATE's `NOT EXISTS` orphan check to
+    // return false and the UPDATE would skip — leaving the original (full)
+    // content in place. By UPDATEing first we still have NEW.content as the
+    // table column value, and NEW.* refers to the trigger-time snapshot of the
+    // pre-statement row so length(NEW.content) reflects the original full
+    // length in both substrings.
+    let orphan_body = format!(
+        "UPDATE __crsql_fugue_active SET counter = counter + 1 WHERE id = 1; \
+         UPDATE \"{backing}\" \
+           SET content = substr(NEW.content, ( \
+                 SELECT MIN(child.parentIdx) FROM \"{backing}\" child \
+                  WHERE child.row_pk = NEW.row_pk \
+                    AND child.parentItemId = NEW.itemId \
+                    AND child.parentIdx >= (NEW.idx - length(NEW.content) + 1) \
+                    AND child.parentIdx < NEW.idx \
+                    AND NOT EXISTS ( \
+                      SELECT 1 FROM \"{backing}\" p2 \
+                       WHERE p2.row_pk = NEW.row_pk AND p2.itemId = NEW.itemId AND p2.idx = child.parentIdx \
+                    ) \
+               ) - NEW.idx + length(NEW.content) + 1) \
+           WHERE row_pk = NEW.row_pk AND itemId = NEW.itemId AND idx = NEW.idx; \
+         INSERT INTO \"{backing}\" (row_pk, itemId, idx, content, parentItemId, parentIdx, tombstoned) \
+           SELECT NEW.row_pk, NEW.itemId, child.parentIdx, \
+                  substr(NEW.content, 1, child.parentIdx - NEW.idx + length(NEW.content)), \
+                  NEW.parentItemId, NEW.parentIdx, NEW.tombstoned \
+             FROM \"{backing}\" child \
+             WHERE child.row_pk = NEW.row_pk \
+               AND child.parentItemId = NEW.itemId \
+               AND child.parentIdx >= (NEW.idx - length(NEW.content) + 1) \
+               AND child.parentIdx < NEW.idx \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM \"{backing}\" p2 \
+                  WHERE p2.row_pk = NEW.row_pk AND p2.itemId = NEW.itemId AND p2.idx = child.parentIdx \
+               ) \
+             ORDER BY child.parentIdx ASC LIMIT 1; \
+         UPDATE __crsql_fugue_active SET counter = counter - 1 WHERE id = 1; \
+         {render}",
+        backing = backing_esc,
+        render = render_sql,
+    );
+
+    let orphan_when = format!(
+        " WHEN NEW.idx != -1 \
+            AND NEW.content IS NOT NULL AND length(NEW.content) > 0 \
+            AND (SELECT counter FROM __crsql_fugue_active WHERE id=1) = 0 \
+            AND EXISTS ( \
+              SELECT 1 FROM \"{backing}\" child \
+               WHERE child.row_pk = NEW.row_pk \
+                 AND child.parentItemId = NEW.itemId \
+                 AND child.parentIdx >= (NEW.idx - length(NEW.content) + 1) \
+                 AND child.parentIdx < NEW.idx \
+                 AND NOT EXISTS ( \
+                   SELECT 1 FROM \"{backing}\" p2 \
+                    WHERE p2.row_pk = NEW.row_pk AND p2.itemId = NEW.itemId AND p2.idx = child.parentIdx \
+                 ) \
+            )",
+        backing = backing_esc,
+    );
+
+    let trig_orphan_ai = format!(
+        "CREATE TRIGGER IF NOT EXISTS \"{backing}__split_orphan_ai\" \
+         AFTER INSERT ON \"{backing}\"{when} BEGIN {body}; END",
+        backing = backing_esc,
+        when = orphan_when,
+        body = orphan_body,
+    );
+    db.exec_safe(&trig_orphan_ai)
+        .map_err(|_| format!("failed to install orphan AFTER INSERT trigger on {}", backing))?;
+
+    let trig_orphan_au = format!(
+        "CREATE TRIGGER IF NOT EXISTS \"{backing}__split_orphan_au_content\" \
+         AFTER UPDATE OF content ON \"{backing}\"{when} BEGIN {body}; END",
+        backing = backing_esc,
+        when = orphan_when,
+        body = orphan_body,
+    );
+    db.exec_safe(&trig_orphan_au)
+        .map_err(|_| format!("failed to install orphan AFTER UPDATE-content trigger on {}", backing))?;
 
     Ok(())
 }
