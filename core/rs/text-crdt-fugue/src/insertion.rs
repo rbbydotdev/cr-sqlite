@@ -80,14 +80,82 @@ fn perform_insert(
 
     // Load all nodes for this row_pk (Phase 2: full load is fine; a doc has tens to hundreds of rows).
     // #!~ Phase 6: switch to a cursor-based walk if profiling shows quadratic
-    let nodes = load_nodes(db, &backing, row_pk)
+    let mut nodes = load_nodes(db, &backing, row_pk)
         .map_err(|_| format!("failed to load fugue nodes for row_pk={}", row_pk))?;
 
-    // Walk in tree order, accumulating rendered character offset.
-    // Find (left, right) neighbor at `position`.
-    // Left = the (item_id, idx) we land just-past in the rendered text.
-    // Right = the next visible node, or None at end-of-doc.
-    let (left, right) = find_neighbors_at(&nodes, position);
+    // Walk to find neighbors. If position is strictly INSIDE a run (mid-run), split it first.
+    let mut split_writes = 0usize;
+    let (left, right) = match find_neighbors_or_split(&nodes, position) {
+        NeighborLookup::Boundary { left, right } => (left, right),
+        NeighborLookup::MidRun {
+            entry_item_id,
+            entry_idx,
+            split_offset,
+            parent_item_id,
+            parent_idx,
+        } => {
+            // Split the entry row at `split_offset`. Existing row keeps its idx and becomes the
+            // RIGHT half (preserving any children attached to the original idx). A new row is
+            // INSERTed for the LEFT half with a fresh idx in (logical) original-item-position space.
+            let entry = nodes
+                .iter()
+                .find(|n| n.item_id == entry_item_id && n.idx == entry_idx)
+                .ok_or_else(|| String::from("internal: split entry not found"))?;
+            let content = entry
+                .content
+                .clone()
+                .ok_or_else(|| String::from("internal: split entry has no content"))?;
+            let chars: Vec<char> = content.chars().collect();
+            let l_text: String = chars.iter().take(split_offset).collect();
+            let r_text: String = chars.iter().skip(split_offset).collect();
+            // a = entry_idx - len + 1 (first index occupied by this entry's content)
+            let a = entry_idx - (chars.len() as i32) + 1;
+            let left_new_idx = a + (split_offset as i32) - 1;
+
+            // UPDATE existing: content = right half
+            update_row_content(db, &backing, row_pk, &entry_item_id, entry_idx, Some(&r_text))?;
+            // INSERT new left half (same itemId, new idx, same parent)
+            insert_node(
+                db,
+                &backing,
+                row_pk,
+                &entry_item_id,
+                left_new_idx,
+                Some(&l_text),
+                &parent_item_id,
+                parent_idx,
+                /*or_ignore=*/ false,
+            )
+            .map_err(|_| String::from("failed to insert split left half"))?;
+            split_writes = 2;
+
+            // Update in-memory snapshot to reflect the split, so subsequent has_children logic is correct.
+            // Mutate existing entry's content; push new left row.
+            for n in nodes.iter_mut() {
+                if n.item_id == entry_item_id && n.idx == entry_idx {
+                    n.content = Some(r_text.clone());
+                }
+            }
+            nodes.push(Node {
+                item_id: entry_item_id.clone(),
+                idx: left_new_idx,
+                content: Some(l_text),
+                parent_item_id: parent_item_id.clone(),
+                parent_idx,
+            });
+
+            (
+                Some(NodeRef {
+                    item_id: entry_item_id.clone(),
+                    idx: left_new_idx,
+                }),
+                Some(NodeRef {
+                    item_id: entry_item_id,
+                    idx: entry_idx,
+                }),
+            )
+        }
+    };
 
     // Generate a fresh item_id for this insertion.
     let new_item_id = fresh_item_id(db).map_err(|_| String::from("failed to generate item_id"))?;
@@ -203,7 +271,128 @@ fn perform_insert(
     .map_err(|_| String::from("failed to insert new content row"))?;
     written += 1;
 
-    Ok(written)
+    Ok(written + split_writes)
+}
+
+/// Result of locating an insertion point: either a boundary (left/right refs) or a mid-run
+/// position that requires splitting the entry first.
+enum NeighborLookup {
+    Boundary {
+        left: Option<NodeRef>,
+        right: Option<NodeRef>,
+    },
+    MidRun {
+        entry_item_id: String,
+        entry_idx: i32,
+        /// 0-based offset within the entry's content where the new content should land.
+        split_offset: usize,
+        parent_item_id: String,
+        parent_idx: i32,
+    },
+}
+
+fn find_neighbors_or_split(nodes: &[Node], position: i32) -> NeighborLookup {
+    use alloc::collections::BTreeMap;
+    let mut children: BTreeMap<(String, i32), Vec<&Node>> = BTreeMap::new();
+    for n in nodes {
+        children
+            .entry((n.parent_item_id.clone(), n.parent_idx))
+            .or_default()
+            .push(n);
+    }
+    for v in children.values_mut() {
+        v.sort_by(|a, b| (a.item_id.as_str(), a.idx).cmp(&(b.item_id.as_str(), b.idx)));
+    }
+
+    let mut visible: Vec<&Node> = Vec::new();
+    let mut stack: Vec<(String, i32)> = Vec::new();
+    stack.push((String::new(), -2));
+    walk_visible(&children, &mut stack, &mut visible);
+
+    let mut consumed = 0i32;
+    let mut left: Option<NodeRef> = None;
+    for n in &visible {
+        let len = n.content.as_ref().map(|s| s.chars().count() as i32).unwrap_or(0);
+        if consumed >= position {
+            return NeighborLookup::Boundary {
+                left,
+                right: Some(NodeRef {
+                    item_id: n.item_id.clone(),
+                    idx: n.idx,
+                }),
+            };
+        }
+        if consumed + len <= position {
+            // entirely before — current becomes left
+            left = Some(NodeRef {
+                item_id: n.item_id.clone(),
+                idx: n.idx,
+            });
+            consumed += len;
+            continue;
+        }
+        // position strictly inside this run: consumed < position < consumed + len
+        let split_offset = (position - consumed) as usize;
+        return NeighborLookup::MidRun {
+            entry_item_id: n.item_id.clone(),
+            entry_idx: n.idx,
+            split_offset,
+            parent_item_id: n.parent_item_id.clone(),
+            parent_idx: n.parent_idx,
+        };
+    }
+    // Walked past everything — position is at/past end of doc.
+    NeighborLookup::Boundary { left, right: None }
+}
+
+fn walk_visible<'a>(
+    children: &alloc::collections::BTreeMap<(String, i32), Vec<&'a Node>>,
+    stack: &mut Vec<(String, i32)>,
+    out: &mut Vec<&'a Node>,
+) {
+    let Some(top) = stack.last().cloned() else {
+        return;
+    };
+    if let Some(kids) = children.get(&top) {
+        for kid in kids {
+            let is_sentinel = kid.idx == -1;
+            let is_tombstone = kid.content.is_none();
+            if !is_sentinel && !is_tombstone {
+                if let Some(s) = &kid.content {
+                    if !s.is_empty() {
+                        out.push(kid);
+                    }
+                }
+            }
+            stack.push((kid.item_id.clone(), kid.idx));
+            walk_visible(children, stack, out);
+            stack.pop();
+        }
+    }
+}
+
+fn update_row_content(
+    db: *mut sqlite3,
+    backing: &str,
+    row_pk: i64,
+    item_id: &str,
+    idx: i32,
+    content: Option<&str>,
+) -> Result<(), String> {
+    let sql = format!(
+        "UPDATE \"{}\" SET content = ? WHERE row_pk = ? AND itemId = ? AND idx = ?",
+        escape_ident(backing)
+    );
+    let stmt = db.prepare_v2(&sql).map_err(|_| String::from("prepare update"))?;
+    match content {
+        Some(s) => stmt.bind_text(1, s, Destructor::TRANSIENT).map_err(|_| String::from("bind content"))?,
+        None => stmt.bind_null(1).map_err(|_| String::from("bind NULL"))?,
+    };
+    stmt.bind_int64(2, row_pk).map_err(|_| String::from("bind row_pk"))?;
+    stmt.bind_text(3, item_id, Destructor::TRANSIENT).map_err(|_| String::from("bind itemId"))?;
+    stmt.bind_int(4, idx).map_err(|_| String::from("bind idx"))?;
+    stmt.step().map_err(|_| String::from("update step"))?;
+    Ok(())
 }
 
 fn load_nodes(db: *mut sqlite3, backing: &str, row_pk: i64) -> Result<Vec<Node>, ResultCode> {

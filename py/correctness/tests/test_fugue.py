@@ -76,9 +76,18 @@ def apply_changes(c, rows):
     c.commit()
 
 
+def cleanup(c):
+    c.execute("SELECT crsql_fugue_cleanup('notes','body',1)")
+    c.commit()
+
+
 def sync_pair(a, b):
     apply_changes(b, pull(a, site_id(b)))
     apply_changes(a, pull(b, site_id(a)))
+    # Run cleanup on both peers after sync — tantaman's trim algorithm trues up
+    # concurrent-split overlaps so each peer sees the deterministic Fugue render.
+    cleanup(a)
+    cleanup(b)
 
 
 # Strategies

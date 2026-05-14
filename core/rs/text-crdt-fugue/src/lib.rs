@@ -4,6 +4,7 @@
 
 extern crate alloc;
 
+mod cleanup;
 mod deletion;
 mod insertion;
 mod registration;
@@ -45,6 +46,14 @@ pub extern "C" fn crsql_fugue_render(
     argv: *mut *mut sqlite::value,
 ) {
     render::fugue_render(ctx, argc, argv);
+}
+
+pub extern "C" fn crsql_fugue_cleanup(
+    ctx: *mut sqlite::context,
+    argc: i32,
+    argv: *mut *mut sqlite::value,
+) {
+    cleanup::fugue_cleanup(ctx, argc, argv);
 }
 
 #[no_mangle]
@@ -100,6 +109,19 @@ pub extern "C" fn sqlite3_crsqltextcrdtfugue_init(
         sqlite::UTF8 | sqlite::DETERMINISTIC | sqlite::INNOCUOUS,
         None,
         Some(crsql_fugue_render),
+        None,
+        None,
+        None,
+    ) {
+        return rc as c_int;
+    }
+
+    if let Err(rc) = db.create_function_v2(
+        "crsql_fugue_cleanup",
+        3,
+        sqlite::UTF8 | sqlite::DIRECTONLY,
+        None,
+        Some(crsql_fugue_cleanup),
         None,
         None,
         None,

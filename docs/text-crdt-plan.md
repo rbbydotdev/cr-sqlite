@@ -211,11 +211,15 @@ The Hypothesis suite is the gate. If randomized merges find divergence, the algo
 
 ## Known tech-debt (`#!~` markers in source)
 
-### Correctness gaps (defer to a v2 cleanup pass)
+### Resolved by tightening pass (2026-05-14, post-Phase-8)
 
-- **`insertion.rs:249`** — mid-run inserts snap to nearest run boundary instead of splitting the run mid-content. Convergence still holds but the rendered position may not match user intent for arbitrary positions inside a multi-character run.
-- **`deletion.rs:17`** — when splitting a sub-item that has children, the children all attach to the right portion (which keeps the original idx). Under concurrent merge this can leave children semantically mispositioned.
-- **`insertion.rs:23` + `text-crdt-phase4.mjs:185`** — concurrent SPLIT (Weidner's cleanup-pass scenario) converges but produces semantic duplication. Implementing tantaman's smallest-index trim algorithm would fix this. Not blocking sync correctness.
+- ✅ **Mid-run insert** — inserting at a position strictly inside a run now splits the run at the offset and lands the new content correctly. 7/7 mid-run tests pass; was previously snapping to nearest boundary.
+- ✅ **Cleanup pass for concurrent splits** — `crsql_fugue_cleanup(table, col, row_pk)` implements tantaman's smallest-index-first trim algorithm. Called after sync, it dedups overlapping sub-items same-itemId. Concurrent-split scenario went from `"Hey YOUHey AND there"` (duplicated) to `"Hey YOU AND there"` (correct Fugue render).
+
+### Still open
+
+- **`deletion.rs:17`** — when splitting a sub-item that has children, the children all attach to the right portion (which keeps the original idx). Under concurrent merge this can leave children semantically mispositioned. Rare in practice; not exercised by Hypothesis trials so far.
+- **Tombstone-wins-on-NULL** — if peers race a tombstone (`content = NULL`) against a content edit on the same `(itemId, idx)`, cr-sqlite's per-column LWW picks the winner. Adding a `tombstoned INTEGER` column would give monotonic "any peer said delete → it's deleted" semantics. Schema migration cost.
 
 ### Perf (deferred, outside Phase 6 gates)
 
@@ -231,11 +235,30 @@ The Hypothesis suite is the gate. If randomized merges find divergence, the algo
 
 ## What this delivers
 
-A SQLite-resident text-CRDT column type, opt-in per parent column via `SELECT crsql_as_text_crdt('table', 'column')`, with these properties verified in 246 + 6 tests:
+A SQLite-resident text-CRDT column type, opt-in per parent column via `SELECT crsql_as_text_crdt('table', 'column')`, with these properties verified in 246 + 8 tests (post-tighten):
 
-1. Per-column text-CRDT semantics on a CRR — insertion + deletion at arbitrary positions
+1. Per-column text-CRDT semantics on a CRR — insertion + deletion at arbitrary positions, including mid-run splits
 2. N-peer convergence via cr-sqlite's existing `crsql_changes` protocol — no separate sync engine
-3. Native `.dylib` shipping; WASM rebuild still pending (task #8)
-4. Coexists with LWW, OR-Set, Fractional Index, and CausalLengthSet columns on the same parent
+3. **Concurrent-split deduplication via `crsql_fugue_cleanup`** — call after sync to apply tantaman's trim algorithm; correct Fugue semantics restored on the "two humans co-typing the same line" case
+4. Native `.dylib` shipping; WASM rebuild still pending (task #8)
+5. Coexists with LWW, OR-Set, Fractional Index, and CausalLengthSet columns on the same parent
 
-WASM rebuild and the cleanup-pass for Weidner's concurrent-split case are the two largest remaining items, both deferred per #!~ markers.
+## Public SQL surface
+
+```sql
+-- one-time per (table, column)
+SELECT crsql_as_crr('notes');
+SELECT crsql_as_text_crdt('notes', 'body');
+
+-- editor primitives (called from editor bindings translating range ops)
+SELECT crsql_fugue_insert('notes','body', row_pk, position, text);
+SELECT crsql_fugue_delete('notes','body', row_pk, from, to);
+
+-- canonical read (bypasses materialization cascade)
+SELECT crsql_fugue_render('notes','body', row_pk);
+
+-- run after each sync-apply for correctness on concurrent-split scenarios
+SELECT crsql_fugue_cleanup('notes','body', row_pk);
+```
+
+WASM rebuild is the largest remaining item; the v1 substrate is otherwise complete for native deployment.
