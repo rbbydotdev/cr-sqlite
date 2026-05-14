@@ -47,21 +47,126 @@ pub fn fugue_insert(
         return;
     }
 
-    // Transparent mode: bump active counter so per-row render triggers suppress during
-    // perform_insert's writes, then explicitly rerender once after exit.
+    let backing = backing_table_name(table, column);
+    let user_data = ctx.user_data();
+
+    // Track whether the fast path was taken so we can skip the O(N) end-of-
+    // function rerender. The fast path itself updates `body` incrementally
+    // (append-only string concat), turning the per-call cost from O(N) to
+    // O(1) amortised — without which the cache wouldn't actually translate
+    // to linear total time.
+    let mut fast_path_taken = false;
+
     let result = crate::active::with_active(db, || {
-        perform_insert(db, table, column, row_pk, position, text)
+        if let Some(cache) = unsafe { crate::cache::cache_from_user_data(user_data) } {
+            if let Some(entry) = cache.get(&backing, row_pk) {
+                let current_version = crate::cache::read_version(db, &backing, row_pk)
+                    .map_err(|_| String::from("cache: read_version"))?;
+                if current_version == entry.backing_version && position == entry.view_length {
+                    let n = perform_append_fast_path(
+                        db, table, column, &backing, row_pk, text, &entry, cache,
+                    )?;
+                    fast_path_taken = true;
+                    return Ok(n);
+                }
+            }
+        }
+
+        // Slow path: full visible-chars walk via perform_insert. Afterward,
+        // refresh the cache so the *next* append can take the fast path.
+        let n = perform_insert(db, table, column, row_pk, position, text)?;
+        if let Some(cache) = unsafe { crate::cache::cache_from_user_data(user_data) } {
+            crate::cache::refresh_from_db(db, &backing, row_pk, cache)?;
+        }
+        Ok(n)
     });
     match result {
         Ok(n) => {
-            if let Err(msg) = crate::render::rerender_parent_column(db, table, column, row_pk) {
-                ctx.result_error(&msg);
-                return;
+            // Fast path already updated `body` incrementally — skip the full
+            // rerender to keep per-op cost O(1). Slow path takes the
+            // canonical render path for correctness.
+            if !fast_path_taken {
+                if let Err(msg) =
+                    crate::render::rerender_parent_column(db, table, column, row_pk)
+                {
+                    ctx.result_error(&msg);
+                    return;
+                }
             }
             ctx.result_int(n as i32);
         }
         Err(msg) => ctx.result_error(&msg),
     }
+}
+
+/// O(1) append at the end of the doc. Trusts the cache's tail pointer; the
+/// caller must have verified `position == cache.view_length` AND the cache's
+/// version snapshot matches the current backing version.
+///
+/// Also updates the materialised parent column incrementally via SQL
+/// concatenation (`body = body || ?`), avoiding the O(N) tree-walk render
+/// the slow path uses. Total per-call cost stays O(1) amortised.
+fn perform_append_fast_path(
+    db: *mut sqlite3,
+    table: &str,
+    column: &str,
+    backing: &str,
+    row_pk: i64,
+    text: &str,
+    entry: &crate::cache::AppendCacheEntry,
+    cache: &crate::cache::ConnCache,
+) -> Result<usize, String> {
+    let new_item_id = fresh_item_id(db).map_err(|_| String::from("fast: fresh_item_id"))?;
+    let new_text_len = text.chars().count() as i32;
+    let new_idx = new_text_len - 1;
+
+    insert_node(
+        db,
+        backing,
+        row_pk,
+        &new_item_id,
+        new_idx,
+        Some(text),
+        &entry.tail_item_id,
+        entry.tail_original_idx,
+        /*or_ignore=*/ false,
+    )
+    .map_err(|_| String::from("fast: insert_node"))?;
+
+    // Incrementally append to the materialised parent column. Cheap UPDATE
+    // with one string concat — same final state as the full render walker
+    // would produce, just without the walk.
+    let parent_esc = crate::util::escape_ident(table);
+    let col_esc = crate::util::escape_ident(column);
+    let append_sql = alloc::format!(
+        "UPDATE \"{parent}\" SET \"{col}\" = COALESCE(\"{col}\", '') || ? WHERE rowid = ?",
+        parent = parent_esc,
+        col = col_esc,
+    );
+    let stmt = db
+        .prepare_v2(&append_sql)
+        .map_err(|_| String::from("fast: prepare append"))?;
+    stmt.bind_text(1, text, sqlite::Destructor::TRANSIENT)
+        .map_err(|_| String::from("fast: bind text"))?;
+    stmt.bind_int64(2, row_pk)
+        .map_err(|_| String::from("fast: bind row_pk"))?;
+    stmt.step().map_err(|_| String::from("fast: step append"))?;
+
+    let new_version =
+        crate::cache::read_version(db, backing, row_pk).unwrap_or(entry.backing_version + 1);
+
+    cache.set(
+        backing,
+        row_pk,
+        crate::cache::AppendCacheEntry {
+            backing_version: new_version,
+            tail_item_id: new_item_id,
+            tail_original_idx: new_idx,
+            view_length: entry.view_length + new_text_len,
+        },
+    );
+
+    Ok(1)
 }
 
 /// (itemId, idx) — a node in the Fugue tree.

@@ -258,6 +258,101 @@ fn is_deletion_marker(node: &Node) -> bool {
     is_deletion_marker_node(&node.item_id, node.tombstoned)
 }
 
+/// Summary of the visible chars: total count + identity of the LAST visible
+/// char. Equivalent to `visible_chars(nodes).last().cloned()` paired with
+/// `visible_chars(nodes).len()` but walks the tree in O(N) without
+/// allocating a per-char Vec — important for the cache-refresh path after
+/// bulk inserts where the visible_chars Vec would be huge.
+pub(crate) fn visible_summary(nodes: &[Node]) -> Option<(String, i32, usize)> {
+    let mut by_parent: BTreeMap<&str, Vec<&Node>> = BTreeMap::new();
+    for n in nodes {
+        by_parent
+            .entry(n.parent_item_id.as_str())
+            .or_default()
+            .push(n);
+    }
+    for v in by_parent.values_mut() {
+        v.sort_by(|a, b| {
+            a.parent_idx
+                .cmp(&b.parent_idx)
+                .then_with(|| a.item_id.cmp(&b.item_id))
+                .then_with(|| a.idx.cmp(&b.idx))
+        });
+    }
+
+    let mut count: usize = 0;
+    let mut last: Option<(String, i32)> = None;
+    if let Some(roots) = by_parent.get("") {
+        for kid in roots.iter().filter(|r| r.parent_idx == -2) {
+            walk_summary(kid, &by_parent, &mut count, &mut last);
+        }
+    }
+    last.map(|(id, idx)| (id, idx, count))
+}
+
+fn walk_summary<'a>(
+    node: &'a Node,
+    by_parent: &BTreeMap<&'a str, Vec<&'a Node>>,
+    count: &mut usize,
+    last: &mut Option<(String, i32)>,
+) {
+    let chars_count = match &node.content {
+        Some(s) => s.chars().count(),
+        None => 0,
+    };
+    let kids = by_parent.get(node.item_id.as_str());
+
+    if chars_count == 0 {
+        if let Some(kids_v) = kids {
+            for kid in kids_v.iter().filter(|k| k.parent_idx == node.idx) {
+                walk_summary(kid, by_parent, count, last);
+            }
+        }
+        return;
+    }
+
+    let n_chars = chars_count as i32;
+    let first_idx = node.idx - n_chars + 1;
+
+    let mut covered: alloc::collections::BTreeSet<i32> = alloc::collections::BTreeSet::new();
+    if let Some(kids_v) = kids {
+        for kid in kids_v.iter() {
+            if is_deletion_marker(kid)
+                && kid.parent_idx >= first_idx
+                && kid.parent_idx <= node.idx
+            {
+                let span_len = kid
+                    .content
+                    .as_ref()
+                    .map(|c| c.chars().count() as i32)
+                    .unwrap_or(0);
+                if span_len > 0 {
+                    let start = (kid.parent_idx - span_len + 1).max(first_idx);
+                    for p in start..=kid.parent_idx {
+                        covered.insert(p);
+                    }
+                }
+            }
+        }
+    }
+
+    for offset in 0..n_chars {
+        let abs_idx = first_idx + offset;
+        if !node.tombstoned && node.idx != -1 && !covered.contains(&abs_idx) {
+            *count += 1;
+            *last = Some((node.item_id.clone(), abs_idx));
+        }
+        if let Some(kids_v) = kids {
+            for kid in kids_v
+                .iter()
+                .filter(|k| k.parent_idx == abs_idx && !is_deletion_marker(k))
+            {
+                walk_summary(kid, by_parent, count, last);
+            }
+        }
+    }
+}
+
 /// Walk the Fugue tree producing one entry per visible char in render order.
 /// Mirrors render.rs::walk_node but emits per-char records instead of a string,
 /// so callers can resolve a view-position back to the (itemId, original_idx)
@@ -351,6 +446,14 @@ fn walk_chars<'a>(
             }
         }
     }
+}
+
+pub(crate) fn load_nodes_pub(
+    db: *mut sqlite3,
+    backing: &str,
+    row_pk: i64,
+) -> Result<Vec<Node>, ResultCode> {
+    load_nodes(db, backing, row_pk)
 }
 
 fn load_nodes(db: *mut sqlite3, backing: &str, row_pk: i64) -> Result<Vec<Node>, ResultCode> {

@@ -129,11 +129,13 @@ fn register(db: *mut sqlite3, table: &str, column: &str) -> Result<(), String> {
     //        so the per-row trigger fires-but-skips. At end-of-function the explicit
     //        rerender_parent_column call renders once. N-row writes → 1 render.
     ensure_active_counter_table(db)?;
+    ensure_versions_table(db)?;
     // recursive_triggers stays ON so the render trigger's RECURSIVE CTE walks
     // its own re-fire safely under the counter-guarded WHEN clause.
     db.exec_safe("PRAGMA recursive_triggers = ON")
         .map_err(|_| String::from("failed to enable recursive_triggers"))?;
     install_render_trigger(db, &backing, table, column)?;
+    install_version_triggers(db, &backing)?;
     // #!~ Cleanup-on-apply (concurrent-split overlap trim) is the missing
     // piece for fuzz convergence. A pure-SQL trim trigger was prototyped but
     // proved too aggressive for delete+insert scenarios — needs more careful
@@ -207,6 +209,74 @@ fn ensure_active_counter_table(db: *mut sqlite3) -> Result<(), String> {
         INSERT OR IGNORE INTO __crsql_fugue_active (id, counter) VALUES (1, 0);",
     )
     .map_err(|_| String::from("failed to create __crsql_fugue_active"))?;
+    Ok(())
+}
+
+/// Helper table that tracks a monotonic version per `row_pk` across all
+/// backing tables. Bumped by per-backing triggers (installed by
+/// `install_version_triggers`) on every INSERT/UPDATE/DELETE. The Rust
+/// in-process cache (cache.rs) snapshots this version when it builds its
+/// state and re-checks on the next UDF call to decide whether the cache is
+/// still good. Keyed by `(backing, row_pk)` so multiple Fugue-tracked
+/// columns on the same row don't cross-invalidate.
+fn ensure_versions_table(db: *mut sqlite3) -> Result<(), String> {
+    db.exec_safe(
+        "CREATE TABLE IF NOT EXISTS __crsql_fugue_versions (\
+            backing TEXT NOT NULL,\
+            row_pk INTEGER NOT NULL,\
+            version INTEGER NOT NULL DEFAULT 0,\
+            PRIMARY KEY (backing, row_pk)\
+        )",
+    )
+    .map_err(|_| String::from("failed to create __crsql_fugue_versions"))?;
+    Ok(())
+}
+
+/// Bump-on-write triggers for the backing table. Each fires AFTER the row
+/// mutation and upserts the per-(backing, row_pk) version counter. Cheap
+/// (~1μs per fire) but does add a small per-write cost; the upside is O(1)
+/// cache-validity checks on the read side, which turns sequential typing
+/// from O(N²) into O(N).
+fn install_version_triggers(db: *mut sqlite3, backing: &str) -> Result<(), String> {
+    let backing_esc = escape_ident(backing);
+    let backing_lit = backing.replace('\'', "''");
+
+    let bump_sql = |row_pk_expr: &str| -> String {
+        format!(
+            "INSERT INTO __crsql_fugue_versions (backing, row_pk, version) \
+             VALUES ('{btab}', {pk}, 1) \
+             ON CONFLICT(backing, row_pk) DO UPDATE SET version = version + 1",
+            btab = backing_lit,
+            pk = row_pk_expr,
+        )
+    };
+
+    let trig_ai = format!(
+        "CREATE TRIGGER IF NOT EXISTS \"{backing}__version_ai\" \
+         AFTER INSERT ON \"{backing}\" BEGIN {body}; END",
+        backing = backing_esc,
+        body = bump_sql("NEW.row_pk"),
+    );
+    db.exec_safe(&trig_ai)
+        .map_err(|_| format!("failed to install version AI trigger on {}", backing))?;
+
+    let trig_au = format!(
+        "CREATE TRIGGER IF NOT EXISTS \"{backing}__version_au\" \
+         AFTER UPDATE ON \"{backing}\" BEGIN {body}; END",
+        backing = backing_esc,
+        body = bump_sql("NEW.row_pk"),
+    );
+    db.exec_safe(&trig_au)
+        .map_err(|_| format!("failed to install version AU trigger on {}", backing))?;
+
+    let trig_ad = format!(
+        "CREATE TRIGGER IF NOT EXISTS \"{backing}__version_ad\" \
+         AFTER DELETE ON \"{backing}\" BEGIN {body}; END",
+        backing = backing_esc,
+        body = bump_sql("OLD.row_pk"),
+    );
+    db.exec_safe(&trig_ad)
+        .map_err(|_| format!("failed to install version AD trigger on {}", backing))?;
     Ok(())
 }
 
