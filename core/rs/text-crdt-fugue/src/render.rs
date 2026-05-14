@@ -48,17 +48,17 @@ fn render(
     let backing_esc = escape_ident(&backing);
 
     let sql = format!(
-        "WITH RECURSIVE under_node(content, level, itemId, idx) AS (\
-            VALUES ('', 0, '', -2) \
+        "WITH RECURSIVE under_node(content, level, itemId, idx, tombstoned) AS (\
+            VALUES ('', 0, '', -2, 0) \
             UNION ALL \
-            SELECT f.content, under_node.level + 1, f.itemId, f.idx \
+            SELECT f.content, under_node.level + 1, f.itemId, f.idx, f.tombstoned \
             FROM \"{backing}\" f \
             JOIN under_node ON f.parentItemId = under_node.itemId AND f.parentIdx = under_node.idx \
             WHERE f.row_pk = ? \
             ORDER BY 2 DESC, f.itemId, f.idx \
          ) \
          SELECT IFNULL(group_concat(content, ''), '') FROM under_node \
-         WHERE idx != -1 AND content IS NOT NULL",
+         WHERE idx != -1 AND tombstoned = 0",
         backing = backing_esc
     );
 

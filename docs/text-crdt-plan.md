@@ -216,10 +216,16 @@ The Hypothesis suite is the gate. If randomized merges find divergence, the algo
 - ✅ **Mid-run insert** — inserting at a position strictly inside a run now splits the run at the offset and lands the new content correctly. 7/7 mid-run tests pass; was previously snapping to nearest boundary.
 - ✅ **Cleanup pass for concurrent splits** — `crsql_fugue_cleanup(table, col, row_pk)` implements tantaman's smallest-index-first trim algorithm. Called after sync, it dedups overlapping sub-items same-itemId. Concurrent-split scenario went from `"Hey YOUHey AND there"` (duplicated) to `"Hey YOU AND there"` (correct Fugue render).
 
-### Still open
+### Resolved in tightening pass (2026-05-14)
 
-- **`deletion.rs:17`** — when splitting a sub-item that has children, the children all attach to the right portion (which keeps the original idx). Under concurrent merge this can leave children semantically mispositioned. Rare in practice; not exercised by Hypothesis trials so far.
-- **Tombstone-wins-on-NULL** — if peers race a tombstone (`content = NULL`) against a content edit on the same `(itemId, idx)`, cr-sqlite's per-column LWW picks the winner. Adding a `tombstoned INTEGER` column would give monotonic "any peer said delete → it's deleted" semantics. Schema migration cost.
+- ✅ **Mid-run insert** — split-at-position before insert; lands at correct rendered offset
+- ✅ **Cleanup pass** for concurrent splits — tantaman's smallest-idx trim algorithm
+- ✅ **Tombstone-wins-on-NULL race** — replaced with dedicated `tombstoned INTEGER NOT NULL DEFAULT 0` column. Deletion sets `tombstoned=1` (content preserved for cleanup overlap math). cr-sqlite syncs the cell via per-column LWW; 0→1 monotonic, `1 > 0` under ValueWin → tombstone always wins regardless of concurrent content edits on the same primary key.
+- ✅ **Split-with-children re-parenting** — re-examined; not actually a gap. The right-half-keeps-original-idx convention preserves children's `parentIdx` references across splits. Removed from the "falls short" list.
+
+### Known limits (by design, not bugs)
+
+- **Cross-split deletion intent does not propagate.** If peer A whole-deletes row X while peer B concurrently splits X into L/M/R, A's tombstone applies only to X (now R portion). The new L row that B created — which A never saw — survives. This is pure-CRDT semantics; "union of deletion intents" would require range-tombstone semantics outside Fugue's model.
 
 ### Perf (deferred, outside Phase 6 gates)
 

@@ -63,6 +63,10 @@ fn register(db: *mut sqlite3, table: &str, column: &str) -> Result<(), String> {
 
     // 3. create backing table — Weidner schema (renaming "index" → "idx" to avoid the SQL keyword)
     //    WITHOUT ROWID per the perf-principles section of the plan.
+    // `tombstoned` is a dedicated boolean cell for delete-vs-edit race resistance.
+    // Deletion sets tombstoned=1 (content preserved for cleanup overlap math).
+    // cr-sqlite syncs the cell via LWW; 0→1 monotonic, 1>0 under ValueWin tie-break →
+    // any peer's tombstone wins over any peer's concurrent content edit.
     let create_table = format!(
         "CREATE TABLE IF NOT EXISTS \"{backing}\" (\
             row_pk INTEGER NOT NULL,\
@@ -71,6 +75,7 @@ fn register(db: *mut sqlite3, table: &str, column: &str) -> Result<(), String> {
             content TEXT,\
             parentItemId TEXT,\
             parentIdx INTEGER,\
+            tombstoned INTEGER NOT NULL DEFAULT 0,\
             PRIMARY KEY (row_pk, itemId, idx)\
          ) WITHOUT ROWID",
         backing = backing_esc
@@ -137,19 +142,21 @@ fn install_render_trigger(
     let parent_esc = escape_ident(parent_table);
     let col_esc = escape_ident(parent_column);
 
+    // Render filter: include if not a sentinel (idx != -1) AND not tombstoned.
+    // The recursive CTE projects the tombstoned column up so the SELECT can filter it.
     let render_body = format!(
         "UPDATE \"{parent}\" SET \"{col}\" = (\
-            WITH RECURSIVE under_node(content, level, itemId, idx) AS (\
-                VALUES ('', 0, '', -2) \
+            WITH RECURSIVE under_node(content, level, itemId, idx, tombstoned) AS (\
+                VALUES ('', 0, '', -2, 0) \
                 UNION ALL \
-                SELECT f.content, under_node.level + 1, f.itemId, f.idx \
+                SELECT f.content, under_node.level + 1, f.itemId, f.idx, f.tombstoned \
                 FROM \"{backing}\" f \
                 JOIN under_node ON f.parentItemId = under_node.itemId AND f.parentIdx = under_node.idx \
                 WHERE f.row_pk = ROW_PK_PARAM \
                 ORDER BY 2 DESC, f.itemId, f.idx \
             ) \
             SELECT IFNULL(group_concat(content, ''), '') FROM under_node \
-            WHERE idx != -1 AND content IS NOT NULL \
+            WHERE idx != -1 AND tombstoned = 0 \
         ) \
         WHERE rowid = ROW_PK_PARAM",
         parent = parent_esc,

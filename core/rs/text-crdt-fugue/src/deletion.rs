@@ -53,6 +53,7 @@ struct Node {
     content: Option<String>,
     parent_item_id: String,
     parent_idx: i32,
+    tombstoned: bool,
 }
 
 fn perform_delete(
@@ -85,6 +86,7 @@ fn perform_delete(
             l_text: Option<String>, // None if empty
             l_idx: Option<i32>,
             m_idx: i32, // tombstone
+            m_text: String, // deleted content — preserved so cleanup-pass can detect overlap
             r_text: Option<String>, // None if empty (use NULL on existing row)
         },
     }
@@ -105,9 +107,10 @@ fn perform_delete(
 
         let content_str = &entry.content;
         let len = content_str.chars().count();
-        let l_text: String = content_str.chars().take(local_from).collect();
-        let m_chars = local_to - local_from;
-        let r_text: String = content_str.chars().skip(local_to).collect();
+        let chars_vec: Vec<char> = content_str.chars().collect();
+        let l_text: String = chars_vec.iter().take(local_from).collect();
+        let m_text: String = chars_vec.iter().skip(local_from).take(local_to - local_from).collect();
+        let r_text: String = chars_vec.iter().skip(local_to).collect();
 
         if l_text.is_empty() && r_text.is_empty() {
             ops.push(Op::WholeTombstone {
@@ -124,10 +127,6 @@ fn perform_delete(
                 None
             };
             let m_idx = a + (local_to as i32) - 1;
-            // Sanity: m_idx must be < entry.idx (since m_chars >= 1 and r is to the right of m).
-            // If r is empty, m_idx == entry.idx — collision. In that case we keep the existing row
-            // as the tombstone (whole-tail tombstone) and only insert L.
-            let _ = m_chars;
 
             ops.push(Op::SplitLeftMiddleRight {
                 item_id: entry.item_id.clone(),
@@ -137,6 +136,7 @@ fn perform_delete(
                 l_text: if l_text.is_empty() { None } else { Some(l_text) },
                 l_idx,
                 m_idx,
+                m_text,
                 r_text: if r_text.is_empty() { None } else { Some(r_text) },
             });
         }
@@ -146,7 +146,9 @@ fn perform_delete(
     for op in ops {
         match op {
             Op::WholeTombstone { item_id, idx } => {
-                update_content(db, &backing, row_pk, &item_id, idx, None)?;
+                // Set tombstoned=1; keep content (matters for cleanup-pass overlap math
+                // and for tombstone-wins-on-NULL race resistance).
+                mark_tombstoned(db, &backing, row_pk, &item_id, idx)?;
                 writes += 1;
             }
             Op::SplitLeftMiddleRight {
@@ -157,28 +159,32 @@ fn perform_delete(
                 l_text,
                 l_idx,
                 m_idx,
+                m_text,
                 r_text,
             } => {
                 match r_text {
                     Some(r) => {
-                        // Existing row becomes R (still at orig_idx).
+                        // Existing row becomes R (still at orig_idx, tombstoned=0).
                         update_content(db, &backing, row_pk, &item_id, orig_idx, Some(&r))?;
-                        // Insert M tombstone at m_idx (must be < orig_idx).
+                        // Insert M tombstone at m_idx (tombstoned=1). Preserve deleted content
+                        // so cleanup-pass can detect overlap with concurrent L-portions same itemId.
                         insert_split_part(
                             db,
                             &backing,
                             row_pk,
                             &item_id,
                             m_idx,
-                            None,
+                            Some(&m_text),
                             &parent_item_id,
                             parent_idx,
+                            /*tombstoned=*/ true,
                         )?;
                         writes += 2;
                     }
                     None => {
                         // No right portion: existing row becomes M (whole-tail tombstone).
-                        update_content(db, &backing, row_pk, &item_id, orig_idx, None)?;
+                        // Preserve content; just flip tombstoned.
+                        mark_tombstoned(db, &backing, row_pk, &item_id, orig_idx)?;
                         writes += 1;
                     }
                 }
@@ -192,6 +198,7 @@ fn perform_delete(
                         Some(&l),
                         &parent_item_id,
                         parent_idx,
+                        /*tombstoned=*/ false,
                     )?;
                     writes += 1;
                 }
@@ -251,7 +258,7 @@ fn walk(
     if let Some(kids) = children.get(&top) {
         for kid in kids {
             let is_sentinel = kid.idx == -1;
-            let is_tombstone = kid.content.is_none();
+            let is_tombstone = kid.content.is_none() || kid.tombstoned;
             if !is_sentinel && !is_tombstone {
                 if let Some(s) = &kid.content {
                     let chars = s.chars().count() as i32;
@@ -278,7 +285,7 @@ fn walk(
 
 fn load_nodes(db: *mut sqlite3, backing: &str, row_pk: i64) -> Result<Vec<Node>, ResultCode> {
     let sql = format!(
-        "SELECT itemId, idx, content, parentItemId, parentIdx \
+        "SELECT itemId, idx, content, parentItemId, parentIdx, tombstoned \
          FROM \"{}\" WHERE row_pk = ?",
         escape_ident(backing)
     );
@@ -296,6 +303,7 @@ fn load_nodes(db: *mut sqlite3, backing: &str, row_pk: i64) -> Result<Vec<Node>,
             },
             parent_item_id: String::from(stmt.column_text(3)?),
             parent_idx: stmt.column_int(4),
+            tombstoned: stmt.column_int(5) != 0,
         });
     }
     Ok(out)
@@ -341,10 +349,11 @@ fn insert_split_part(
     content: Option<&str>,
     parent_item_id: &str,
     parent_idx: i32,
+    tombstoned: bool,
 ) -> Result<(), String> {
     let sql = format!(
-        "INSERT OR IGNORE INTO \"{}\" (row_pk, itemId, idx, content, parentItemId, parentIdx) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO \"{}\" (row_pk, itemId, idx, content, parentItemId, parentIdx, tombstoned) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
         escape_ident(backing)
     );
     let stmt = db
@@ -366,10 +375,41 @@ fn insert_split_part(
         .map_err(|_| String::from("bind parent_item_id"))?;
     stmt.bind_int(6, parent_idx)
         .map_err(|_| String::from("bind parent_idx"))?;
+    stmt.bind_int(7, if tombstoned { 1 } else { 0 })
+        .map_err(|_| String::from("bind tombstoned"))?;
     stmt.step()
         .map_err(|_| String::from("insert_split_part step"))?;
     Ok(())
 }
+
+/// Set tombstoned=1 on an existing row without changing its content. Used for whole-row deletes
+/// where we want to preserve content for cleanup overlap math and tombstone-wins races.
+fn mark_tombstoned(
+    db: *mut sqlite3,
+    backing: &str,
+    row_pk: i64,
+    item_id: &str,
+    idx: i32,
+) -> Result<(), String> {
+    let sql = format!(
+        "UPDATE \"{}\" SET tombstoned = 1 WHERE row_pk = ? AND itemId = ? AND idx = ?",
+        escape_ident(backing)
+    );
+    let stmt = db
+        .prepare_v2(&sql)
+        .map_err(|_| String::from("prepare mark_tombstoned"))?;
+    stmt.bind_int64(1, row_pk)
+        .map_err(|_| String::from("bind row_pk"))?;
+    stmt.bind_text(2, item_id, Destructor::TRANSIENT)
+        .map_err(|_| String::from("bind item_id"))?;
+    stmt.bind_int(3, idx)
+        .map_err(|_| String::from("bind idx"))?;
+    stmt.step()
+        .map_err(|_| String::from("mark_tombstoned step"))?;
+    Ok(())
+}
+
+// (derive_middle_content removed — m_text now carried directly through the Op struct.)
 
 /// Force a re-render of the parent column. The AFTER INSERT trigger covers insertions but
 /// whole-tombstone deletes only UPDATE the existing row.
@@ -380,17 +420,17 @@ fn rerender_parent(db: *mut sqlite3, table: &str, column: &str, row_pk: i64) -> 
     let backing = backing_table_name(table, column);
     let sql = format!(
         "UPDATE \"{parent}\" SET \"{col}\" = (\
-            WITH RECURSIVE under_node(content, level, itemId, idx) AS (\
-                VALUES ('', 0, '', -2) \
+            WITH RECURSIVE under_node(content, level, itemId, idx, tombstoned) AS (\
+                VALUES ('', 0, '', -2, 0) \
                 UNION ALL \
-                SELECT f.content, under_node.level + 1, f.itemId, f.idx \
+                SELECT f.content, under_node.level + 1, f.itemId, f.idx, f.tombstoned \
                 FROM \"{backing}\" f \
                 JOIN under_node ON f.parentItemId = under_node.itemId AND f.parentIdx = under_node.idx \
                 WHERE f.row_pk = ? \
                 ORDER BY 2 DESC, f.itemId, f.idx \
             ) \
             SELECT IFNULL(group_concat(content, ''), '') FROM under_node \
-            WHERE idx != -1 AND content IS NOT NULL \
+            WHERE idx != -1 AND tombstoned = 0 \
          ) \
          WHERE rowid = ?",
         parent = escape_ident(table),

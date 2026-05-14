@@ -66,6 +66,7 @@ struct Node {
     content: Option<String>,
     parent_item_id: String,
     parent_idx: i32,
+    tombstoned: bool,
 }
 
 fn perform_insert(
@@ -142,6 +143,7 @@ fn perform_insert(
                 content: Some(l_text),
                 parent_item_id: parent_item_id.clone(),
                 parent_idx,
+                tombstoned: false,
             });
 
             (
@@ -356,7 +358,8 @@ fn walk_visible<'a>(
     if let Some(kids) = children.get(&top) {
         for kid in kids {
             let is_sentinel = kid.idx == -1;
-            let is_tombstone = kid.content.is_none();
+            // Both legacy NULL-content tombstones (pre-migration) and tombstoned=1 rows are invisible.
+            let is_tombstone = kid.content.is_none() || kid.tombstoned;
             if !is_sentinel && !is_tombstone {
                 if let Some(s) = &kid.content {
                     if !s.is_empty() {
@@ -397,7 +400,7 @@ fn update_row_content(
 
 fn load_nodes(db: *mut sqlite3, backing: &str, row_pk: i64) -> Result<Vec<Node>, ResultCode> {
     let sql = format!(
-        "SELECT itemId, idx, content, parentItemId, parentIdx \
+        "SELECT itemId, idx, content, parentItemId, parentIdx, tombstoned \
          FROM \"{}\" WHERE row_pk = ?",
         escape_ident(backing)
     );
@@ -415,6 +418,7 @@ fn load_nodes(db: *mut sqlite3, backing: &str, row_pk: i64) -> Result<Vec<Node>,
             },
             parent_item_id: String::from(stmt.column_text(3)?),
             parent_idx: stmt.column_int(4),
+            tombstoned: stmt.column_int(5) != 0,
         });
     }
     Ok(out)
