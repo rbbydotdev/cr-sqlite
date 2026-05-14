@@ -7,6 +7,8 @@ shipped as a portable WASM extension with a browser demo + benchmark page.
 For the upstream project's positioning, examples, and broader CRDT story
 see [`old_readme.md`](./old_readme.md).
 
+![Multi-peer collaborative text demo with synced backing-row tables](./docs/images/demo.png)
+
 ## What this fork adds
 
 - **`crsql_as_text_crdt(table, column)`** — promote any TEXT column into a
@@ -74,6 +76,8 @@ Same server, navigate to `http://localhost:8787/bench.html`. Click `run`
 once — a 32-cell matrix fills in over ~5s covering append, mid-content
 typing, multi-cluster typing (K ∈ {4, 8, 16}), and single-call bulk
 inserts (1k / 10k / 100k chars).
+
+![Benchmark matrix — per-op ms across scenarios and doc sizes](./docs/images/bench.png)
 
 ### Test suites
 
