@@ -222,54 +222,81 @@ fn group_children_by_parent<'a>(rows: &'a [Row]) -> BTreeMap<&'a str, Vec<&'a Ro
     by_parent
 }
 
+/// One unit of pending work for the iterative walker. `Emit` pushes a char
+/// onto the output; `Walk` expands a node into its own sequence of emits +
+/// child-walks at the moment it's popped. The expansion is lazy so the
+/// stack stays bounded — for the β-flat linear chain (each char's parent
+/// is the previous char) the live stack holds at most 2 entries at a
+/// time, instead of 1 native call frame per char.
+///
+/// Why this matters: β-flat documents of N visible chars produce a tree
+/// of depth N. The previous recursive `walk_node` hit the OS thread stack
+/// around N≈100k. With an explicit stack the limit becomes available
+/// heap, which is gigabytes.
+enum Todo<'a> {
+    Emit(char),
+    Walk(&'a Row),
+}
+
 fn walk_root_children<'a>(
     by_parent: &BTreeMap<&'a str, Vec<&'a Row>>,
     out: &mut String,
 ) {
+    let mut stack: Vec<Todo<'a>> = Vec::new();
     if let Some(kids) = by_parent.get(ROOT_ITEM) {
-        for kid in kids.iter().filter(|r| r.parent_idx == ROOT_IDX) {
-            walk_node(kid, by_parent, out);
+        // Push in reverse so popping gives forward order.
+        for kid in kids.iter().filter(|r| r.parent_idx == ROOT_IDX).rev() {
+            stack.push(Todo::Walk(*kid));
+        }
+    }
+    while let Some(todo) = stack.pop() {
+        match todo {
+            Todo::Emit(c) => out.push(c),
+            Todo::Walk(node) => {
+                let actions = expand_node(node, by_parent);
+                for a in actions.into_iter().rev() {
+                    stack.push(a);
+                }
+            }
         }
     }
 }
 
-/// Walk a single node: emit its content char-by-char, and at each absolute char
-/// position check for children whose `parent_idx` equals that position. Mid-
-/// content children render between the appropriate chars of the parent.
+/// Compute the action sequence for one node: at each absolute char position
+/// covered by `node.content`, emit the char (if the node is visible and the
+/// position isn't covered by a deletion marker), then queue child-walks
+/// whose `parent_idx` lands on that position.
 ///
-/// Deletion-marker children (β-flat partial-delete encoding) suppress emission
-/// of the parent chars in the covered range. Markers are pre-scanned before the
-/// char walk to build a `covered_positions` set.
+/// Deletion-marker children (β-flat partial-delete encoding) suppress
+/// emission of the parent chars in the covered range. Markers are pre-
+/// scanned before the char walk to build a `covered_positions` set.
 ///
-/// Sentinel rows (`idx == -1`, used by the existing Case-3 insertion logic) have
-/// no content and serve only as tree-shape anchors; we walk straight through to
-/// their children.
-fn walk_node<'a>(
+/// Sentinel rows (`idx == -1`, used by Case-3 insertion logic) and other
+/// empty-content rows have no chars to emit; the single visit position
+/// becomes `node.idx` so children attached there still run.
+fn expand_node<'a>(
     node: &'a Row,
     by_parent: &BTreeMap<&'a str, Vec<&'a Row>>,
-    out: &mut String,
-) {
+) -> Vec<Todo<'a>> {
     let chars: Vec<char> = node.content.chars().collect();
     let kids = by_parent.get(node.item_id.as_str());
+    let mut actions: Vec<Todo<'a>> = Vec::new();
 
-    // Empty-content rows (sentinels or rows whose content is intentionally empty):
-    // there are no chars to walk, but children attached at this row's idx must
-    // still be visited.
     if chars.is_empty() {
         if let Some(kids_v) = kids {
             for kid in kids_v.iter().filter(|k| k.parent_idx == node.idx) {
-                walk_node(kid, by_parent, out);
+                actions.push(Todo::Walk(*kid));
             }
         }
-        return;
+        return actions;
     }
 
     let n_chars = chars.len() as i32;
     let first_idx = node.idx - n_chars + 1;
 
-    // Pre-scan markers to build the set of parent chars they cover. A marker's
-    // `parent_idx` is the LAST covered position; its content length is the span.
-    let mut covered_until: Option<i32> = None;
+    // Pre-scan markers to build the set of parent chars they cover. A
+    // marker's `parent_idx` is the LAST covered position; its content
+    // length is the span.
     let mut covered_set: alloc::collections::BTreeSet<i32> =
         alloc::collections::BTreeSet::new();
     if let Some(kids_v) = kids {
@@ -284,26 +311,23 @@ fn walk_node<'a>(
                 for p in start..=end {
                     covered_set.insert(p);
                 }
-                covered_until = Some(covered_until.unwrap_or(i32::MIN).max(end));
             }
         }
     }
-    let _ = covered_until; // reserved for fast-path skip optimisation
 
     for (offset, ch) in chars.iter().enumerate() {
         let abs_idx = first_idx + (offset as i32);
-
         if !node.tombstoned && node.idx != -1 && !covered_set.contains(&abs_idx) {
-            out.push(*ch);
+            actions.push(Todo::Emit(*ch));
         }
-
         if let Some(kids_v) = kids {
             for kid in kids_v
                 .iter()
                 .filter(|k| k.parent_idx == abs_idx && !is_deletion_marker(k))
             {
-                walk_node(kid, by_parent, out);
+                actions.push(Todo::Walk(*kid));
             }
         }
     }
+    actions
 }
