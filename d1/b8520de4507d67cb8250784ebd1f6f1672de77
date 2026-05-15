@@ -1,0 +1,58 @@
+core/rs/text-crdt-fugue/src/render.rs
+  s_3ac64368b6b350::t_7ab9361cfcb082 42,45,47,50
+  s_3ac64368b6b350::t_44be003654d7ac 118-124,127
+  s_3ac64368b6b350::t_581e1ca433617e 146
+  s_3ac64368b6b350::t_84cefa30a7de27 161
+  s_3ac64368b6b350::t_a832c3c336bae1 82-88,91
+tests/smoke/text-crdt-text-pk.mjs
+  s_3ac64368b6b350::t_5fd04bacf52e4c 1-154
+core/rs/text-crdt-fugue/src/registration.rs
+  s_3ac64368b6b350::t_57934fefa3ed42 77-81
+  s_3ac64368b6b350::t_059a1d7f3121a4 94,229
+  s_3ac64368b6b350::t_4ea7ae06559f3b 317
+  s_3ac64368b6b350::t_9cccd58bd1278e 309-316,318-354
+  s_3ac64368b6b350::t_43c697406ce4a2 139
+  s_3ac64368b6b350::t_4c732e62bed82d 360,365
+  s_3ac64368b6b350::t_2db22f4de4bd92 4
+  s_3ac64368b6b350::t_ee5a0c1d7fb869 377,382
+core/rs/text-crdt-fugue/src/lib.rs
+  s_3ac64368b6b350::t_a9f8d562ba7469 15
+core/rs/text-crdt-fugue/src/row_pk.rs
+  s_3ac64368b6b350::t_9f095beebc7f14 90
+  s_3ac64368b6b350::t_46fd747f29c470 1-28,30-53,56-58,60-89,91-134
+  s_3ac64368b6b350::t_39d0bab7dde4d5 54-55,59
+  s_3ac64368b6b350::t_862f1085b4d5ea 29
+core/rs/text-crdt-fugue/src/insertion.rs
+  s_3ac64368b6b350::t_2a09ef6c030481 66,69-70,76,89,97,112,122,127,142
+  s_3ac64368b6b350::t_6a56ed84643db8 274,282-287
+  s_3ac64368b6b350::t_ac08a76a5c0049 40-46
+  s_3ac64368b6b350::t_21c70467a7eec1 172,200-201,206,209,227,230
+  s_3ac64368b6b350::t_4578662f2a1b2f 589
+  s_3ac64368b6b350::t_cc2ef2fd22b4dc 554
+core/rs/text-crdt-fugue/src/cache.rs
+  s_3ac64368b6b350::t_9ceba9f8b1b680 187,197,200,204,207,212,218,222,225
+  s_3ac64368b6b350::t_901cf05106774e 279
+  s_3ac64368b6b350::t_07d557e9563d30 253
+core/rs/text-crdt-fugue/src/deletion.rs
+  s_3ac64368b6b350::t_74ca3c06f6bc4b 84,90-95
+  s_3ac64368b6b350::t_376665dd002712 33-40,51,59-61
+  s_3ac64368b6b350::t_f8c5a85d38f617 465,470
+  s_3ac64368b6b350::t_003a2e1fcea2b4 543
+  s_3ac64368b6b350::t_dc3279bfc25271 499
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "d1b8520de4507d67cb8250784ebd1f6f1672de77",
+  "prompts": {},
+  "sessions": {
+    "s_3ac64368b6b350": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f72c2aa-4f1e-4680-9b3b-9f9423c9e488",
+        "model": "unknown"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
