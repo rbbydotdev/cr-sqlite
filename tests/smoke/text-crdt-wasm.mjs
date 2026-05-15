@@ -1,4 +1,4 @@
-// Verifies the text-CRDT functions (crsql_as_text_crdt, fugue_insert/delete/render/cleanup)
+// Verifies the text-CRDT functions (crsql_as_text_crdt, fugue_insert/delete/render)
 // are exposed in the freshly-built crsqlite.wasm artifact.
 
 import "fake-indexeddb/auto";
@@ -62,14 +62,7 @@ r = (await db.execA("SELECT crsql_fugue_render('notes','body',1)"))[0][0];
 if (r !== "hello world") fail(`after delete: ${r}`);
 console.log("ok: delete → 'hello world'");
 
-// 4. Cleanup is idempotent (no overlap on local-only edits)
-const before = (await db.execA("SELECT count(*) FROM __crsql_fugue_notes_body WHERE row_pk=1"))[0][0];
-const updates = (await db.execA("SELECT crsql_fugue_cleanup('notes','body',1)"))[0][0];
-const after = (await db.execA("SELECT count(*) FROM __crsql_fugue_notes_body WHERE row_pk=1"))[0][0];
-if (before !== after) fail(`cleanup changed row count locally: ${before} → ${after}`);
-console.log(`ok: cleanup idempotent (${updates} updates, ${after} rows)`);
-
-// 5. Tombstoned column exists in the schema
+// 4. Tombstoned column exists in the schema
 const schema = (
   await db.execA("SELECT sql FROM sqlite_master WHERE name='__crsql_fugue_notes_body'")
 )[0][0];

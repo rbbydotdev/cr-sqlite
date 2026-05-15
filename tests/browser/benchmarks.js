@@ -9,7 +9,7 @@
 //   3. 1K mid-run inserts (each insert splits a run — worst case for current code)
 //   4. 10K-char single paste (should be 1 row)
 //   5. 1K deletes
-//   6. 2-peer sync with 100 ops each + cleanup
+//   6. 2-peer sync with 100 ops each
 
 import initWasm from "@vlcn.io/crsqlite-wasm";
 
@@ -46,9 +46,6 @@ async function ins(db, pos, t) {
 }
 async function del(db, from, to) {
   await db.exec("SELECT crsql_fugue_delete('notes','body',1,?,?)", [from, to]);
-}
-async function cleanup(db) {
-  await db.exec("SELECT crsql_fugue_cleanup('notes','body',1)");
 }
 async function siteId(db) {
   return (await db.execA("SELECT crsql_site_id()"))[0][0];
@@ -158,7 +155,7 @@ async function benchBigRangeDelete(sqlite, size, opts) {
 
 async function benchEditChurn(sqlite, n, opts) {
   // Insert + delete + insert in a tight cycle at random positions.
-  // Stresses cleanup + tombstone management.
+  // Stresses tombstone management.
   const db = await open(sqlite, opts);
   await ins(db, 0, "x".repeat(50));
   for (let i = 0; i < n; i++) {
@@ -177,7 +174,6 @@ async function bench2PeerSync(sqlite, opsPerPeer, opts) {
   const b = await open(sqlite, opts);
   await ins(a, 0, "shared text");
   await apply(b, await pull(a, await siteId(b)));
-  await cleanup(b);
   for (let i = 0; i < opsPerPeer; i++) {
     const lenA = (await body(a)).length;
     if (lenA > 0) {
@@ -200,8 +196,6 @@ async function bench2PeerSync(sqlite, opsPerPeer, opts) {
   const sA = await siteId(a);
   await apply(b, await pull(a, sB));
   await apply(a, await pull(b, sA));
-  await cleanup(a);
-  await cleanup(b);
   const bodyA = await body(a);
   const bodyB = await body(b);
   if (bodyA !== bodyB) throw new Error(`DIVERGED: ${bodyA} vs ${bodyB}`);

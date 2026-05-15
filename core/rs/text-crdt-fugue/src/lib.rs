@@ -6,7 +6,6 @@ extern crate alloc;
 
 mod active;
 mod cache;
-mod cleanup;
 #[cfg(feature = "debug-monitor")]
 pub mod debug_monitor;
 mod deletion;
@@ -52,14 +51,6 @@ pub extern "C" fn crsql_fugue_render(
     render::fugue_render(ctx, argc, argv);
 }
 
-pub extern "C" fn crsql_fugue_cleanup(
-    ctx: *mut sqlite::context,
-    argc: i32,
-    argv: *mut *mut sqlite::value,
-) {
-    cleanup::fugue_cleanup(ctx, argc, argv);
-}
-
 pub extern "C" fn crsql_fugue_flush(
     ctx: *mut sqlite::context,
     argc: i32,
@@ -78,8 +69,8 @@ pub extern "C" fn sqlite3_crsqltextcrdtfugue_init(
 
     // Allocate a per-connection insertion cache and hand its pointer to the
     // UDFs that need it (insert and delete). The pointer is leaked — lives
-    // as long as the connection. Other UDFs (render, cleanup, flush,
-    // as_text_crdt) don't read or write the cache and get user_data=None.
+    // as long as the connection. Other UDFs (render, flush, as_text_crdt)
+    // don't read or write the cache and get user_data=None.
     let cache_ptr = cache::make_conn_cache();
 
     if let Err(rc) = db.create_function_v2(
@@ -119,19 +110,6 @@ pub extern "C" fn sqlite3_crsqltextcrdtfugue_init(
         sqlite::UTF8 | sqlite::INNOCUOUS,
         None,
         Some(crsql_fugue_render),
-        None,
-        None,
-        None,
-    ) {
-        return rc as c_int;
-    }
-
-    if let Err(rc) = db.create_function_v2(
-        "crsql_fugue_cleanup",
-        3,
-        sqlite::UTF8 | sqlite::DIRECTONLY,
-        None,
-        Some(crsql_fugue_cleanup),
         None,
         None,
         None,

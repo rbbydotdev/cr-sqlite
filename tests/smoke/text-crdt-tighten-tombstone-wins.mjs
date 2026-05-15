@@ -33,8 +33,6 @@ const ins = (db, p, t) =>
   db.prepare("SELECT crsql_fugue_insert('notes','body',1,?,?)").get(p, t);
 const del = (db, f, t) =>
   db.prepare("SELECT crsql_fugue_delete('notes','body',1,?,?)").get(f, t);
-const cleanup = (db) =>
-  db.prepare("SELECT crsql_fugue_cleanup('notes','body',1)").pluck().get();
 const rows = (db) =>
   db
     .prepare(
@@ -62,8 +60,6 @@ function apply(to, changes) {
 function syncBoth(a, b) {
   apply(b, pull(a, siteId(b)));
   apply(a, pull(b, siteId(a)));
-  cleanup(a);
-  cleanup(b);
 }
 
 function fail(msg, dbs) {

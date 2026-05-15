@@ -142,7 +142,7 @@ fn register(db: *mut sqlite3, table: &str, column: &str) -> Result<(), String> {
     // own row with a unique itemId, so concurrent inserts produce siblings
     // — Fugue ordering converges them deterministically without trimming.
     // Verified by 2000-iter fuzz with the cleanup() call disabled (0 fails).
-    // The UDF still exists as a no-op safety net for downstream callers.
+    // The UDF and its module have been retired entirely.
 
     // 6. UNTRACK the parent column at the cr-sqlite layer.
     //    notes.body is a materialized view of the Fugue backing rows. cr-sqlite's

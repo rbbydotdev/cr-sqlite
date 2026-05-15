@@ -41,13 +41,11 @@ pub fn fugue_delete(
     }
 
     let result = crate::active::with_active(db, || {
-        perform_delete(db, table, column, row_pk, from, to)?;
-        // Coalesce adjacent tombstones from this delete (and any prior deletes on
-        // the same itemId). Inline here so the explicit rerender below sees the
-        // coalesced state.
-        let backing = crate::util::backing_table_name(table, column);
-        crate::cleanup::coalesce_tombstones(db, &backing, row_pk)?;
-        Ok(())
+        perform_delete(db, table, column, row_pk, from, to)
+        // Note: a β-split-era `coalesce_tombstones` pass ran here to drop
+        // non-rightmost adjacent same-itemId tombstones. Obsolete in β-flat —
+        // every char gets a unique itemId so the "group by itemId" filter
+        // produces only singletons. Removed alongside the cleanup module.
     });
     match result {
         Ok(_) => {
