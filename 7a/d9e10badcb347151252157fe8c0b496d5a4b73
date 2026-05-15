@@ -1,0 +1,21 @@
+core/rs/text-crdt-fugue/src/insertion.rs
+  s_3ac64368b6b350::t_2bfd39135024b8 618-620,622-630
+tests/smoke/text-crdt-sibling-ordering.mjs
+  s_3ac64368b6b350::t_facdc4021cebc7 1-195
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "7ad9e10badcb347151252157fe8c0b496d5a4b73",
+  "prompts": {},
+  "sessions": {
+    "s_3ac64368b6b350": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f72c2aa-4f1e-4680-9b3b-9f9423c9e488",
+        "model": "unknown"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
