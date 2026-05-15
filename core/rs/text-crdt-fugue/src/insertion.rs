@@ -387,10 +387,10 @@ fn perform_insert(
                         // Fall back to Case 2 — child of left. The new node sorts as a sibling of
                         // existing (tombstone/sentinel) children; (itemId, idx) ordering is then
                         // determined by item-id hex.
-                        // #!~ Edge case worth revisiting: a stable end-of-doc append might want
-                        // the new node placed as a child of the deepest-rightmost visible
-                        // descendant rather than as a sibling of left's children. Not exercised
-                        // by the Hypothesis trials so far.
+                        //
+                        // Pinned by tests/smoke/text-crdt-eod-tombstone-children.mjs: this
+                        // placement converges across peers under local re-type, concurrent
+                        // insert+delete vs EOD append, and 3-way merge with tombstone.
                         (l, None)
                     }
                 }
