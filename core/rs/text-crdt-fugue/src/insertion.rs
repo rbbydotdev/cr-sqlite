@@ -615,9 +615,19 @@ fn insert_node(
     Ok(())
 }
 
-/// Generate a fresh item_id: hex(crsql_site_id()) prefix + random suffix.
+/// Generate a fresh item_id: hex(crsql_site_id()) prefix + 6 random bytes
+/// (12 hex chars). 2^48 entropy is plenty to make intra-site collisions
+/// astronomically unlikely.
 ///
-/// #!~ tighten to {site}.{monotonic_counter} for ordering stability
+/// We explored swapping to `{site}.{monotonic_counter}` for "ordering
+/// stability", but the property that motivated the change (peers
+/// converging on a bit-identical backing-row order, not just identical
+/// renders) already holds under random suffixes — see
+/// tests/smoke/text-crdt-sibling-ordering.mjs. Same-site siblings at the
+/// same parent_idx tie-break by lexicographic string compare on itemId,
+/// which is stable across peers because both peers see the same itemIds
+/// for the same logical inserts. Counter-based IDs would add a
+/// per-connection persistence requirement for marginal debuggability gain.
 pub(crate) fn fresh_item_id(db: *mut sqlite3) -> Result<String, ResultCode> {
     let stmt = db.prepare_v2(
         "SELECT lower(hex(crsql_site_id())) || '_' || lower(hex(randomblob(6)))",
