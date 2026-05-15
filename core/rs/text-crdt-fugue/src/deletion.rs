@@ -30,7 +30,14 @@ pub fn fugue_delete(
 
     let table = arg_slice[0].text();
     let column = arg_slice[1].text();
-    let row_pk = arg_slice[2].int64();
+    let row_pk = match crate::row_pk::from_value(arg_slice[2]) {
+        Ok(pk) => pk,
+        Err(msg) => {
+            ctx.result_error(&msg);
+            return;
+        }
+    };
+    let row_pk_ref: &[u8] = &row_pk;
     let from = arg_slice[3].int();
     let to = arg_slice[4].int();
     let db = ctx.db_handle();
@@ -41,7 +48,7 @@ pub fn fugue_delete(
     }
 
     let result = crate::active::with_active(db, || {
-        perform_delete(db, table, column, row_pk, from, to)
+        perform_delete(db, table, column, row_pk_ref, from, to)
         // Note: a β-split-era `coalesce_tombstones` pass ran here to drop
         // non-rightmost adjacent same-itemId tombstones. Obsolete in β-flat —
         // every char gets a unique itemId so the "group by itemId" filter
@@ -49,7 +56,9 @@ pub fn fugue_delete(
     });
     match result {
         Ok(_) => {
-            if let Err(msg) = crate::render::rerender_parent_column(db, table, column, row_pk) {
+            if let Err(msg) =
+                crate::render::rerender_parent_column(db, table, column, row_pk_ref)
+            {
                 ctx.result_error(&msg);
                 return;
             }
@@ -72,14 +81,18 @@ fn perform_delete(
     db: *mut sqlite3,
     table: &str,
     column: &str,
-    row_pk: i64,
+    row_pk: &[u8],
     from: i32,
     to: i32,
 ) -> Result<usize, String> {
     let backing = backing_table_name(table, column);
 
-    let nodes = load_nodes(db, &backing, row_pk)
-        .map_err(|_| format!("failed to load nodes for row_pk={}", row_pk))?;
+    let nodes = load_nodes(db, &backing, row_pk).map_err(|_| {
+        format!(
+            "failed to load nodes for row_pk={}",
+            crate::row_pk::show(row_pk)
+        )
+    })?;
 
     // β-flat deletion. Walk visible chars to map view positions [from, to)
     // onto the (item_id, original_idx) pairs they came from — accounting for
@@ -449,19 +462,19 @@ fn walk_chars<'a>(
 pub(crate) fn load_nodes_pub(
     db: *mut sqlite3,
     backing: &str,
-    row_pk: i64,
+    row_pk: &[u8],
 ) -> Result<Vec<Node>, ResultCode> {
     load_nodes(db, backing, row_pk)
 }
 
-fn load_nodes(db: *mut sqlite3, backing: &str, row_pk: i64) -> Result<Vec<Node>, ResultCode> {
+fn load_nodes(db: *mut sqlite3, backing: &str, row_pk: &[u8]) -> Result<Vec<Node>, ResultCode> {
     let sql = format!(
         "SELECT itemId, idx, content, parentItemId, parentIdx, tombstoned \
          FROM \"{}\" WHERE row_pk = ?",
         escape_ident(backing)
     );
     let stmt = db.prepare_v2(&sql)?;
-    stmt.bind_int64(1, row_pk)?;
+    crate::row_pk::bind(&stmt, 1, row_pk)?;
     let mut out = Vec::new();
     while stmt.step()? == ResultCode::ROW {
         out.push(Node {
@@ -483,7 +496,7 @@ fn load_nodes(db: *mut sqlite3, backing: &str, row_pk: i64) -> Result<Vec<Node>,
 fn insert_split_part(
     db: *mut sqlite3,
     backing: &str,
-    row_pk: i64,
+    row_pk: &[u8],
     item_id: &str,
     idx: i32,
     content: Option<&str>,
@@ -499,7 +512,7 @@ fn insert_split_part(
     let stmt = db
         .prepare_v2(&sql)
         .map_err(|_| String::from("prepare insert_split_part"))?;
-    stmt.bind_int64(1, row_pk)
+    crate::row_pk::bind(&stmt, 1, row_pk)
         .map_err(|_| String::from("bind row_pk"))?;
     stmt.bind_text(2, item_id, Destructor::TRANSIENT)
         .map_err(|_| String::from("bind item_id"))?;
@@ -527,7 +540,7 @@ fn insert_split_part(
 fn mark_tombstoned(
     db: *mut sqlite3,
     backing: &str,
-    row_pk: i64,
+    row_pk: &[u8],
     item_id: &str,
     idx: i32,
 ) -> Result<(), String> {
@@ -538,7 +551,7 @@ fn mark_tombstoned(
     let stmt = db
         .prepare_v2(&sql)
         .map_err(|_| String::from("prepare mark_tombstoned"))?;
-    stmt.bind_int64(1, row_pk)
+    crate::row_pk::bind(&stmt, 1, row_pk)
         .map_err(|_| String::from("bind row_pk"))?;
     stmt.bind_text(2, item_id, Destructor::TRANSIENT)
         .map_err(|_| String::from("bind item_id"))?;

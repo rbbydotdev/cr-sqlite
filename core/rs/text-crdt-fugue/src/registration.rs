@@ -1,6 +1,7 @@
 extern crate alloc;
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use sqlite::{args, context, sqlite3, Connection, Context, Destructor, ResultCode, Value};
 use sqlite_nostd as sqlite;
 
@@ -73,10 +74,11 @@ fn register(db: *mut sqlite3, table: &str, column: &str) -> Result<(), String> {
         ));
     }
 
-    // #!~ Parent must have a single INTEGER PRIMARY KEY (aliased to rowid). Compound
-    // PKs or TEXT PKs require row_pk to be a different shape (e.g. BLOB encoding the
-    // tuple). We don't enforce this here; the render trigger silently noops on
-    // mismatched parents so misuse is observable as "body never updates."
+    // Resolve the parent's primary-key column. The render trigger will look
+    // up parent rows via `WHERE "{pk_col}" = NEW.row_pk` — works for INTEGER
+    // PK (aliased to rowid), TEXT PK, BLOB PK, or implicit rowid (no PK
+    // declared). Compound PKs are rejected with a clear error.
+    let parent_pk_col = parent_pk_column(db, table)?;
 
     let backing = backing_table_name(table, column);
     let backing_esc = escape_ident(&backing);
@@ -89,7 +91,7 @@ fn register(db: *mut sqlite3, table: &str, column: &str) -> Result<(), String> {
     // any peer's tombstone wins over any peer's concurrent content edit.
     let create_table = format!(
         "CREATE TABLE IF NOT EXISTS \"{backing}\" (\
-            row_pk INTEGER NOT NULL,\
+            row_pk BLOB NOT NULL,\
             itemId TEXT NOT NULL,\
             idx INTEGER NOT NULL,\
             content TEXT,\
@@ -134,7 +136,7 @@ fn register(db: *mut sqlite3, table: &str, column: &str) -> Result<(), String> {
     // its own re-fire safely under the counter-guarded WHEN clause.
     db.exec_safe("PRAGMA recursive_triggers = ON")
         .map_err(|_| String::from("failed to enable recursive_triggers"))?;
-    install_render_trigger(db, &backing, table, column)?;
+    install_render_trigger(db, &backing, table, column, &parent_pk_col)?;
     install_version_triggers(db, &backing)?;
     // Note: β-flat does not need cleanup-on-apply. The β-split-era
     // `crsql_fugue_cleanup` UDF was designed to trim overlap rows from
@@ -224,7 +226,7 @@ fn ensure_versions_table(db: *mut sqlite3) -> Result<(), String> {
     db.exec_safe(
         "CREATE TABLE IF NOT EXISTS __crsql_fugue_versions (\
             backing TEXT NOT NULL,\
-            row_pk INTEGER NOT NULL,\
+            row_pk BLOB NOT NULL,\
             version INTEGER NOT NULL DEFAULT 0,\
             PRIMARY KEY (backing, row_pk)\
         )",
@@ -304,15 +306,63 @@ fn column_exists(db: *mut sqlite3, table: &str, column: &str) -> Result<bool, Re
     }
 }
 
+/// Resolve the parent table's primary-key column for the render trigger's
+/// parent-row lookup. Rules:
+///   * Exactly one PK column → use it (works for INTEGER PK aliased to
+///     rowid, TEXT PK, or BLOB PK).
+///   * Zero PK columns (table relies on implicit rowid) → use "rowid".
+///   * More than one PK column → reject. Compound PKs would require the
+///     caller to encode the tuple into a blob themselves; supportable but
+///     not wired up yet.
+pub(crate) fn parent_pk_column(db: *mut sqlite3, table: &str) -> Result<String, String> {
+    let stmt = db
+        .prepare_v2("SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk")
+        .map_err(|_| String::from("failed to query parent pragma_table_info"))?;
+    stmt.bind_text(1, table, Destructor::STATIC)
+        .map_err(|_| String::from("bind parent table name"))?;
+    let mut cols: Vec<String> = Vec::new();
+    loop {
+        match stmt
+            .step()
+            .map_err(|_| String::from("step pragma_table_info"))?
+        {
+            ResultCode::ROW => {
+                let name = stmt
+                    .column_text(0)
+                    .map_err(|_| String::from("read pk column name"))?;
+                cols.push(String::from(name));
+            }
+            ResultCode::DONE => break,
+            other => {
+                return Err(format!("pragma_table_info: unexpected step result {:?}", other));
+            }
+        }
+    }
+    if cols.is_empty() {
+        Ok(String::from("rowid"))
+    } else if cols.len() == 1 {
+        Ok(cols.into_iter().next().unwrap())
+    } else {
+        Err(format!(
+            "compound primary keys are not supported (table '{}' has {} PK columns: {})",
+            table,
+            cols.len(),
+            cols.join(", ")
+        ))
+    }
+}
+
 fn install_render_trigger(
     db: *mut sqlite3,
     backing: &str,
     parent_table: &str,
     parent_column: &str,
+    parent_pk_col: &str,
 ) -> Result<(), String> {
     let backing_esc = escape_ident(backing);
     let parent_esc = escape_ident(parent_table);
     let col_esc = escape_ident(parent_column);
+    let pk_esc = escape_ident(parent_pk_col);
 
     // Call the `crsql_fugue_render` UDF (the β-flat Rust walker) instead of
     // inlining a SQL recursive CTE. The walker handles mid-content children
@@ -324,11 +374,12 @@ fn install_render_trigger(
     let _ = backing_esc;
     let render_body = format!(
         "UPDATE \"{parent}\" SET \"{col}\" = crsql_fugue_render('{ptab}', '{pcol}', ROW_PK_PARAM) \
-         WHERE rowid = ROW_PK_PARAM",
+         WHERE \"{pk}\" = ROW_PK_PARAM",
         parent = parent_esc,
         col = col_esc,
         ptab = parent_table.replace('\'', "''"),
         pcol = parent_column.replace('\'', "''"),
+        pk = pk_esc,
     );
 
     // WHEN suppression clause skips the render while a fugue_* function is

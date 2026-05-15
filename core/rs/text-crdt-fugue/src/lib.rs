@@ -12,6 +12,7 @@ mod deletion;
 mod insertion;
 mod registration;
 mod render;
+mod row_pk;
 mod util;
 
 use core::ffi::{c_char, c_int};

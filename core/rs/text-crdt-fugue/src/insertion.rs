@@ -37,7 +37,13 @@ pub fn fugue_insert(
 
     let table = arg_slice[0].text();
     let column = arg_slice[1].text();
-    let row_pk = arg_slice[2].int64();
+    let row_pk = match crate::row_pk::from_value(arg_slice[2]) {
+        Ok(pk) => pk,
+        Err(msg) => {
+            ctx.result_error(&msg);
+            return;
+        }
+    };
     let position = arg_slice[3].int();
     let text = arg_slice[4].text();
     let db = ctx.db_handle();
@@ -57,16 +63,17 @@ pub fn fugue_insert(
     // to linear total time.
     let mut fast_path_taken = false;
 
+    let row_pk_ref: &[u8] = &row_pk;
     let result = crate::active::with_active(db, || {
         if let Some(cache) = unsafe { crate::cache::cache_from_user_data(user_data) } {
-            if let Some(mut doc) = cache.get_doc(&backing, row_pk) {
-                let current_version = crate::cache::read_version(db, &backing, row_pk)
+            if let Some(mut doc) = cache.get_doc(&backing, row_pk_ref) {
+                let current_version = crate::cache::read_version(db, &backing, row_pk_ref)
                     .map_err(|_| String::from("cache: read_version"))?;
                 if current_version != doc.backing_version {
                     // External write (sync apply, manual SQL) shifted the
                     // tree out from under us. Drop all markers — adjusting
                     // them across an unknown batch is too error-prone.
-                    cache.invalidate(&backing, row_pk);
+                    cache.invalidate(&backing, row_pk_ref);
                 } else if let Some((hit_id, hit_idx, hit_pos)) = doc.try_fast_path(position) {
                     // Marker hit: a previous insert at view_position `hit_pos`
                     // has a marker. New insert at `hit_pos + 1` attaches as
@@ -79,7 +86,7 @@ pub fn fugue_insert(
                         table,
                         column,
                         &backing,
-                        row_pk,
+                        row_pk_ref,
                         text,
                         &hit_id,
                         hit_idx,
@@ -87,7 +94,7 @@ pub fn fugue_insert(
                         view_length_before,
                     )?;
                     // Re-read version (the insert bumped it via triggers).
-                    let new_version = crate::cache::read_version(db, &backing, row_pk)
+                    let new_version = crate::cache::read_version(db, &backing, row_pk_ref)
                         .map_err(|_| String::from("cache: read_version post-fast"))?;
                     let new_idx = (text.chars().count() as i32) - 1;
                     // We need the just-inserted node's item_id; perform_append_fast_path
@@ -102,7 +109,7 @@ pub fn fugue_insert(
                         text.chars().count() as i32,
                         new_version,
                     );
-                    cache.set_doc(&backing, row_pk, doc);
+                    cache.set_doc(&backing, row_pk_ref, doc);
                     fast_path_taken = true;
                     return Ok(n.0);
                 }
@@ -112,12 +119,12 @@ pub fn fugue_insert(
         // Slow path. After it finishes, refresh the cache: keeps existing
         // markers (shifted appropriately) and adds a new one at the insert
         // position so subsequent sequential typing here fast-paths.
-        let n = perform_insert(db, table, column, row_pk, position, text)?;
+        let n = perform_insert(db, table, column, row_pk_ref, position, text)?;
         if let Some(cache) = unsafe { crate::cache::cache_from_user_data(user_data) } {
             crate::cache::refresh_after_slow_path(
                 db,
                 &backing,
-                row_pk,
+                row_pk_ref,
                 cache,
                 position,
                 text.chars().count() as i32,
@@ -132,7 +139,7 @@ pub fn fugue_insert(
             // canonical render path for correctness.
             if !fast_path_taken {
                 if let Err(msg) =
-                    crate::render::rerender_parent_column(db, table, column, row_pk)
+                    crate::render::rerender_parent_column(db, table, column, row_pk_ref)
                 {
                     ctx.result_error(&msg);
                     return;
@@ -162,7 +169,7 @@ fn perform_append_fast_path(
     table: &str,
     column: &str,
     backing: &str,
-    row_pk: i64,
+    row_pk: &[u8],
     text: &str,
     hit_item_id: &str,
     hit_original_idx: i32,
@@ -190,20 +197,23 @@ fn perform_append_fast_path(
 
     let parent_esc = crate::util::escape_ident(table);
     let col_esc = crate::util::escape_ident(column);
+    let pk_col = crate::registration::parent_pk_column(db, table)?;
+    let pk_esc = crate::util::escape_ident(&pk_col);
 
     if at_tail {
         // O(1) amortised concat at the end.
         let append_sql = alloc::format!(
-            "UPDATE \"{parent}\" SET \"{col}\" = COALESCE(\"{col}\", '') || ? WHERE rowid = ?",
+            "UPDATE \"{parent}\" SET \"{col}\" = COALESCE(\"{col}\", '') || ? WHERE \"{pk}\" = ?",
             parent = parent_esc,
             col = col_esc,
+            pk = pk_esc,
         );
         let stmt = db
             .prepare_v2(&append_sql)
             .map_err(|_| String::from("fast: prepare tail append"))?;
         stmt.bind_text(1, text, sqlite::Destructor::TRANSIENT)
             .map_err(|_| String::from("fast: bind text"))?;
-        stmt.bind_int64(2, row_pk)
+        crate::row_pk::bind(&stmt, 2, row_pk)
             .map_err(|_| String::from("fast: bind row_pk"))?;
         stmt.step()
             .map_err(|_| String::from("fast: step tail append"))?;
@@ -214,9 +224,10 @@ fn perform_append_fast_path(
         let splice_sql = alloc::format!(
             "UPDATE \"{parent}\" SET \"{col}\" = \
              substr(COALESCE(\"{col}\", ''), 1, ?) || ? || substr(COALESCE(\"{col}\", ''), ?) \
-             WHERE rowid = ?",
+             WHERE \"{pk}\" = ?",
             parent = parent_esc,
             col = col_esc,
+            pk = pk_esc,
         );
         let stmt = db
             .prepare_v2(&splice_sql)
@@ -227,7 +238,7 @@ fn perform_append_fast_path(
             .map_err(|_| String::from("fast: bind splice text"))?;
         stmt.bind_int(3, insert_pos + 1)
             .map_err(|_| String::from("fast: bind splice suffix-start"))?;
-        stmt.bind_int64(4, row_pk)
+        crate::row_pk::bind(&stmt, 4, row_pk)
             .map_err(|_| String::from("fast: bind row_pk"))?;
         stmt.step()
             .map_err(|_| String::from("fast: step mid splice"))?;
@@ -260,7 +271,7 @@ fn perform_insert(
     db: *mut sqlite3,
     table: &str,
     column: &str,
-    row_pk: i64,
+    row_pk: &[u8],
     position: i32,
     text: &str,
 ) -> Result<usize, String> {
@@ -268,8 +279,12 @@ fn perform_insert(
 
     // Load all backing rows for this row_pk. Row count grows with edits; the
     // full load is fine at current scales (see top-of-file note).
-    let nodes = load_nodes(db, &backing, row_pk)
-        .map_err(|_| format!("failed to load fugue nodes for row_pk={}", row_pk))?;
+    let nodes = load_nodes(db, &backing, row_pk).map_err(|_| {
+        format!(
+            "failed to load fugue nodes for row_pk={}",
+            crate::row_pk::show(row_pk)
+        )
+    })?;
 
     // Walk to find neighbors. Mid-run is handled β-flat (no split — new insert
     // attaches at parentIdx inside the entry's content range). `split_writes`
@@ -536,14 +551,14 @@ fn find_neighbors_or_split(nodes: &[Node], position: i32) -> NeighborLookup {
     }
 }
 
-fn load_nodes(db: *mut sqlite3, backing: &str, row_pk: i64) -> Result<Vec<Node>, ResultCode> {
+fn load_nodes(db: *mut sqlite3, backing: &str, row_pk: &[u8]) -> Result<Vec<Node>, ResultCode> {
     let sql = format!(
         "SELECT itemId, idx, content, parentItemId, parentIdx, tombstoned \
          FROM \"{}\" WHERE row_pk = ?",
         escape_ident(backing)
     );
     let stmt = db.prepare_v2(&sql)?;
-    stmt.bind_int64(1, row_pk)?;
+    crate::row_pk::bind(&stmt, 1, row_pk)?;
     let mut out = Vec::new();
     while stmt.step()? == ResultCode::ROW {
         out.push(Node {
@@ -571,7 +586,7 @@ fn has_children(nodes: &[Node], parent: &NodeRef) -> bool {
 fn insert_node(
     db: *mut sqlite3,
     backing: &str,
-    row_pk: i64,
+    row_pk: &[u8],
     item_id: &str,
     idx: i32,
     content: Option<&str>,
@@ -587,7 +602,7 @@ fn insert_node(
         escape_ident(backing)
     );
     let stmt = db.prepare_v2(&sql)?;
-    stmt.bind_int64(1, row_pk)?;
+    crate::row_pk::bind(&stmt, 1, row_pk)?;
     stmt.bind_text(2, item_id, Destructor::TRANSIENT)?;
     stmt.bind_int(3, idx)?;
     match content {

@@ -39,20 +39,22 @@ pub(crate) fn rerender_parent_column(
     db: *mut sqlite3,
     table: &str,
     column: &str,
-    row_pk: i64,
+    row_pk: &[u8],
 ) -> Result<(), String> {
     let rendered = compute_render(db, table, column, row_pk)?;
+    let pk_col = crate::registration::parent_pk_column(db, table)?;
     let sql = format!(
-        "UPDATE \"{parent}\" SET \"{col}\" = ? WHERE rowid = ?",
+        "UPDATE \"{parent}\" SET \"{col}\" = ? WHERE \"{pk}\" = ?",
         parent = escape_ident(table),
         col = escape_ident(column),
+        pk = escape_ident(&pk_col),
     );
     let stmt = db
         .prepare_v2(&sql)
         .map_err(|_| String::from("prepare rerender"))?;
     stmt.bind_text(1, &rendered, Destructor::TRANSIENT)
         .map_err(|_| String::from("bind rendered"))?;
-    stmt.bind_int64(2, row_pk)
+    crate::row_pk::bind(&stmt, 2, row_pk)
         .map_err(|_| String::from("bind row_pk"))?;
     stmt.step().map_err(|_| String::from("rerender step"))?;
     Ok(())
@@ -77,10 +79,16 @@ pub fn fugue_flush(
     }
     let table = arg_slice[0].text();
     let column = arg_slice[1].text();
-    let row_pk = arg_slice[2].int64();
+    let row_pk = match crate::row_pk::from_value(arg_slice[2]) {
+        Ok(pk) => pk,
+        Err(msg) => {
+            ctx.result_error(&msg);
+            return;
+        }
+    };
     let db = ctx.db_handle();
 
-    if let Err(msg) = rerender_parent_column(db, table, column, row_pk) {
+    if let Err(msg) = rerender_parent_column(db, table, column, &row_pk) {
         ctx.result_error(&msg);
     }
 }
@@ -107,10 +115,16 @@ pub fn fugue_render(
     }
     let table = arg_slice[0].text();
     let column = arg_slice[1].text();
-    let row_pk = arg_slice[2].int64();
+    let row_pk = match crate::row_pk::from_value(arg_slice[2]) {
+        Ok(pk) => pk,
+        Err(msg) => {
+            ctx.result_error(&msg);
+            return;
+        }
+    };
     let db = ctx.db_handle();
 
-    match compute_render(db, table, column, row_pk) {
+    match compute_render(db, table, column, &row_pk) {
         Ok(s) => ctx.result_text_transient(&s),
         Err(msg) => ctx.result_error(&msg),
     }
@@ -129,7 +143,7 @@ fn compute_render(
     db: *mut sqlite3,
     table: &str,
     column: &str,
-    row_pk: i64,
+    row_pk: &[u8],
 ) -> Result<String, String> {
     let backing = backing_table_name(table, column);
     let backing_esc = escape_ident(&backing);
@@ -144,7 +158,7 @@ fn compute_render(
 
 /// SELECT every row for this doc — one round-trip rather than a recursive
 /// per-edge join.
-fn load_rows(db: *mut sqlite3, backing_esc: &str, row_pk: i64) -> Result<Vec<Row>, String> {
+fn load_rows(db: *mut sqlite3, backing_esc: &str, row_pk: &[u8]) -> Result<Vec<Row>, String> {
     let sql = format!(
         "SELECT itemId, idx, content, parentItemId, parentIdx, tombstoned \
            FROM \"{}\" WHERE row_pk = ?",
@@ -153,7 +167,7 @@ fn load_rows(db: *mut sqlite3, backing_esc: &str, row_pk: i64) -> Result<Vec<Row
     let stmt = db
         .prepare_v2(&sql)
         .map_err(|_| String::from("prepare load rows"))?;
-    stmt.bind_int64(1, row_pk)
+    crate::row_pk::bind(&stmt, 1, row_pk)
         .map_err(|_| String::from("bind row_pk"))?;
 
     let mut rows = Vec::new();

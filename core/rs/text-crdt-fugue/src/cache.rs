@@ -184,7 +184,7 @@ impl DocCache {
 
 /// Per-connection cache. Keyed by (backing_table_name, row_pk).
 pub(crate) struct ConnCache {
-    inner: RefCell<BTreeMap<(String, i64), DocCache>>,
+    inner: RefCell<BTreeMap<(String, Vec<u8>), DocCache>>,
 }
 
 impl ConnCache {
@@ -194,35 +194,35 @@ impl ConnCache {
         }
     }
 
-    pub(crate) fn get_doc(&self, backing: &str, row_pk: i64) -> Option<DocCache> {
+    pub(crate) fn get_doc(&self, backing: &str, row_pk: &[u8]) -> Option<DocCache> {
         self.inner
             .borrow()
-            .get(&(String::from(backing), row_pk))
+            .get(&(String::from(backing), row_pk.to_vec()))
             .cloned()
     }
 
-    pub(crate) fn set_doc(&self, backing: &str, row_pk: i64, doc: DocCache) {
+    pub(crate) fn set_doc(&self, backing: &str, row_pk: &[u8], doc: DocCache) {
         self.inner
             .borrow_mut()
-            .insert((String::from(backing), row_pk), doc);
+            .insert((String::from(backing), row_pk.to_vec()), doc);
     }
 
     /// Atomically mutate the doc cache. Allows fast-path updates without
     /// the get/modify/set race.
-    pub(crate) fn with_doc<F, R>(&self, backing: &str, row_pk: i64, f: F) -> Option<R>
+    pub(crate) fn with_doc<F, R>(&self, backing: &str, row_pk: &[u8], f: F) -> Option<R>
     where
         F: FnOnce(&mut DocCache) -> R,
     {
         let mut inner = self.inner.borrow_mut();
         inner
-            .get_mut(&(String::from(backing), row_pk))
+            .get_mut(&(String::from(backing), row_pk.to_vec()))
             .map(|doc| f(doc))
     }
 
-    pub(crate) fn invalidate(&self, backing: &str, row_pk: i64) {
+    pub(crate) fn invalidate(&self, backing: &str, row_pk: &[u8]) {
         self.inner
             .borrow_mut()
-            .remove(&(String::from(backing), row_pk));
+            .remove(&(String::from(backing), row_pk.to_vec()));
     }
 }
 
@@ -250,13 +250,13 @@ pub(crate) unsafe fn cache_from_user_data<'a>(p: *mut c_void) -> Option<&'a Conn
 pub(crate) fn read_version(
     db: *mut sqlite3,
     backing: &str,
-    row_pk: i64,
+    row_pk: &[u8],
 ) -> Result<i64, ResultCode> {
     let stmt = db.prepare_v2(
         "SELECT version FROM __crsql_fugue_versions WHERE backing = ? AND row_pk = ?",
     )?;
     stmt.bind_text(1, backing, sqlite::Destructor::TRANSIENT)?;
-    stmt.bind_int64(2, row_pk)?;
+    crate::row_pk::bind(&stmt, 2, row_pk).map_err(|_| ResultCode::ERROR)?;
     if stmt.step()? == ResultCode::ROW {
         Ok(stmt.column_int64(0))
     } else {
@@ -276,7 +276,7 @@ pub(crate) fn read_version(
 pub(crate) fn refresh_after_slow_path(
     db: *mut sqlite3,
     backing: &str,
-    row_pk: i64,
+    row_pk: &[u8],
     cache: &ConnCache,
     insert_pos: i32,
     text_len: i32,
