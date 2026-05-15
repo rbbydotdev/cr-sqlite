@@ -1,0 +1,29 @@
+core/rs/text-crdt-fugue/src/deletion.rs
+  s_3ac64368b6b350::t_d5bd8acfc85279 44-48
+tests/smoke/text-crdt-wasm.mjs
+  s_3ac64368b6b350::t_7fe411914b941c 1
+  s_3ac64368b6b350::t_f0f9833bfb80b5 65
+core/rs/text-crdt-fugue/src/registration.rs
+  s_3ac64368b6b350::t_6907bad503a884 145
+tests/browser/benchmarks.js
+  s_3ac64368b6b350::t_77b3bb779fba0f 158
+  s_3ac64368b6b350::t_8ed3f7171f4257 12
+core/rs/text-crdt-fugue/src/lib.rs
+  s_3ac64368b6b350::t_8337923ac7b42b 72-73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "7652f87a9a93d94a9005667e8b05e4d7ed368238",
+  "prompts": {},
+  "sessions": {
+    "s_3ac64368b6b350": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5f72c2aa-4f1e-4680-9b3b-9f9423c9e488",
+        "model": "unknown"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
