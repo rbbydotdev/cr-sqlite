@@ -19,6 +19,12 @@ see [`old_readme.md`](./old_readme.md).
   + parent pointer. No mid-run splits, no compound items, no overlap
   cleanup pass at sync time. Concurrent inserts at the same position
   produce siblings and Fugue ordering converges them deterministically.
+- **Any single-column primary key** — INTEGER, TEXT, or BLOB. The engine
+  canonicalises whatever value the caller passes into a tag-prefixed
+  byte form for internal use, and the render trigger resolves the
+  parent's PK column from `pragma_table_info` rather than assuming
+  `rowid`. Compound (multi-column) PKs are rejected at registration
+  with a clear error.
 - **Insertion cache (N-marker LRU)** — Yjs-style `ArraySearchMarker`
   ported into the engine. Sequential typing, mid-content typing, and
   jumping between multiple cursor regions all stay flat-per-op as the
@@ -137,9 +143,17 @@ Makefile                    `make` (native), `make wasm` (browser bundle)
 
 Treated as a working fork, not a release. Key invariants are property-
 fuzz-checked across thousands of random multi-peer scenarios; the
-TLA+ model also verifies them at small scale. The cleanup-on-apply UDF
-from the β-split era still ships as a no-op safety net but is unused
-by this architecture (see comment in `core/rs/text-crdt-fugue/src/registration.rs`).
+TLA+ model also verifies them at small scale. Some history worth
+knowing if you're reading the code:
+
+- The β-split-era `crsql_fugue_cleanup` UDF was retired entirely — β-flat
+  produces each char as its own row with a unique itemId, so the
+  concurrent-split overlap that cleanup trimmed simply can't form.
+- The render walker is iterative, not recursive — β-flat documents form
+  a linear chain (each char's parent is the previous char), so an N-char
+  doc would otherwise blow the native thread stack around N≈100k.
+- Sentinel rows (`idx == -1`) from Case-3 insertion logic still exist
+  and the render walker steps through them; they carry no own content.
 
 ## License
 
