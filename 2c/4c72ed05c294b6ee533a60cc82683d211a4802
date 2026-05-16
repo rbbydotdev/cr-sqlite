@@ -1,0 +1,78 @@
+core/rs/bundle_static/Cargo.lock
+  ai_agent 96,128-132
+core/rs/text-crdt-fugue/src/row_pk.rs
+  s_18cf6ee2b24796::t_88ae57c191b199 37-40
+  s_18cf6ee2b24796::t_03f288fb555398 92-94
+core/rs/peritext-marks/src/render.rs
+  s_18cf6ee2b24796::t_ba375586db1a88 375
+  s_18cf6ee2b24796::t_e23bc7e6686f68 443-446
+  s_18cf6ee2b24796::t_3619b929bb0d12 504
+  s_18cf6ee2b24796::t_7f139c883b021e 1-22,24-71,73-77,90-95,97-98,100-117,126-131,136-141,146-155,158-164,166-168,171-184,187-192,195-250,252-303,306-326,329,331-332,335,337-338,341-347,349-350,352-374,376-442,447-503,505-518,520-525
+  s_18cf6ee2b24796::t_e1fc46f4c1b327 72,78-89
+  s_18cf6ee2b24796::t_ac111e2ba1a950 519
+  s_18cf6ee2b24796::t_a75859456ab1cd 251
+  s_18cf6ee2b24796::t_eeab6e344e0b00 118-125,132-135,142-145
+  s_18cf6ee2b24796::t_878c33022f9d9c 327-328,330,333-334,336,339-340,348,351
+  s_18cf6ee2b24796::t_95ecec2a5b35b2 96,99
+  s_18cf6ee2b24796::t_336b94f14837fa 156-157
+  s_18cf6ee2b24796::t_e5d96db3c64791 165,169-170,185-186,193-194
+  s_18cf6ee2b24796::t_15f10e67f904b9 23
+  s_18cf6ee2b24796::t_b6e8bf083bb1c2 304-305
+docs/design/peritext-marks.md
+  s_18cf6ee2b24796::t_03bda75c244bbd 17-18
+  s_18cf6ee2b24796::t_903637df3f2d08 187-203
+  s_18cf6ee2b24796::t_38745bb7a5d703 1-15,19-68,78-186,232-233,236-261
+  s_18cf6ee2b24796::t_b908fdf7ff34fb 16
+  s_18cf6ee2b24796::t_f76a6792344bc3 204-231,234-235
+  s_18cf6ee2b24796::t_7a4f4669a1c982 69-77
+core/rs/bundle/Cargo.toml
+  s_18cf6ee2b24796::t_0c1d7ce7fac956 38,46,54
+  s_18cf6ee2b24796::t_3ce7b38aae94ef 19
+tests/smoke/peritext-phase1.mjs
+  s_18cf6ee2b24796::t_7dbabc6f6ed8d5 1-72,76-77,82-155
+  s_18cf6ee2b24796::t_8f98a91a5ed374 73-75,78-81
+core/rs/peritext-marks/src/registration.rs
+  s_18cf6ee2b24796::t_8d0276ab5c142d 1-75,81-86,88-89,91-172,174-176,179-191,194-214,283-322
+  s_18cf6ee2b24796::t_2838970119b471 173,177-178
+  s_18cf6ee2b24796::t_369cd4307fb9b0 192-193,215-282
+  s_18cf6ee2b24796::t_3b9196adc16acd 76-80,87,90
+core/rs/peritext-marks/src/lib.rs
+  s_18cf6ee2b24796::t_da639d0d7a3972 1-116
+core/rs/text-crdt-fugue/src/lib.rs
+  s_18cf6ee2b24796::t_1f88a39600188c 15-19,22-24
+core/rs/bundle/src/lib.rs
+  s_18cf6ee2b24796::t_93980d124fc1dc 18
+  s_18cf6ee2b24796::t_09dbc1e6ce3eba 78-82
+core/rs/peritext-marks/src/util.rs
+  s_18cf6ee2b24796::t_e1cb33bc5397c4 1-45
+core/rs/peritext-marks/Cargo.toml
+  s_18cf6ee2b24796::t_a4360b9b478bf2 1-36
+core/rs/peritext-marks/src/mark_op.rs
+  s_18cf6ee2b24796::t_4b2863e5773de7 199,202,214-216,218,220-222,224,227,230,233
+  s_18cf6ee2b24796::t_c8c355d85e1e96 153-154,156
+  s_18cf6ee2b24796::t_40a9329d0b2964 173,176
+  s_18cf6ee2b24796::t_a731d146466276 1-120,125,128-134,137-138,141-143,146-152,155,157-172,174-175,177-198,200-201,203-213,217,219,223,225-226,228-229,231-232,234-266
+  s_18cf6ee2b24796::t_14002e090512e3 121-124,126-127,135-136,139-140,144-145
+core/rs/peritext-marks/src/walker.rs
+  s_18cf6ee2b24796::t_bc40d3fb2e0271 36-45,48
+  s_18cf6ee2b24796::t_901751c7ed708d 1-35,46-47,49-133,135-149,151,153-205,207-218
+  s_18cf6ee2b24796::t_b50c1419ef002c 134
+  s_18cf6ee2b24796::t_d75c585f28279d 150,152
+  s_18cf6ee2b24796::t_40aaeee9795d07 206
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "2c4c72ed05c294b6ee533a60cc82683d211a4802",
+  "prompts": {},
+  "sessions": {
+    "s_18cf6ee2b24796": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4e994a1d-8cd6-4fb7-928c-47b6a6c674c5",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
