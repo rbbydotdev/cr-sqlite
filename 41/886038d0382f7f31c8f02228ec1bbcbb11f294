@@ -1,0 +1,26 @@
+tests/smoke/peritext-phase3.mjs
+  s_18cf6ee2b24796::t_0e134e73352838 164-167,187,189-210,212,214
+  s_18cf6ee2b24796::t_e0cdd6f352b546 1-163,168-186,188,211,213,215-219
+core/rs/peritext-marks/src/render.rs
+  s_18cf6ee2b24796::t_946e786f2f552c 318-335,339,353,356,359
+core/rs/peritext-marks/src/registration.rs
+  s_18cf6ee2b24796::t_7120fd00560979 196-216,222-223,231,235
+  s_18cf6ee2b24796::t_e06513189a3cdc 217-220,226,230
+  s_18cf6ee2b24796::t_c718dfb8f6b493 176-179
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "41886038d0382f7f31c8f02228ec1bbcbb11f294",
+  "prompts": {},
+  "sessions": {
+    "s_18cf6ee2b24796": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4e994a1d-8cd6-4fb7-928c-47b6a6c674c5",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
