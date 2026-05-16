@@ -1,0 +1,61 @@
+docs/design/fs-on-tree-crdt.md
+  s_18cf6ee2b24796::t_da9d572aae05c1 1-196
+core/rs/bundle_static/Cargo.lock
+  ai_agent 97,134-135
+docs/design/tree-crdt.md
+  s_18cf6ee2b24796::t_3272898ee4a799 1-175
+core/rs/tree-crdt-kleppmann/Cargo.toml
+  s_18cf6ee2b24796::t_26a6f3e3c8d2bc 1-24
+core/rs/tree-crdt-kleppmann/src/apply.rs
+  s_18cf6ee2b24796::t_81c4f25ab2c369 80-89,114-244
+  s_18cf6ee2b24796::t_11d59bb1b70004 1-79,90-113,245-587
+tests/smoke/tree-crdt-phase1.mjs
+  s_18cf6ee2b24796::t_9ca0b4029870c1 1-175
+core/rs/tree-crdt-kleppmann/src/registration.rs
+  s_18cf6ee2b24796::t_054be44ee01678 4
+  s_18cf6ee2b24796::t_91707136d9fd91 120-128,131-139,141-142,144-156,158-159
+  s_18cf6ee2b24796::t_7042d4b3676a4a 1-3,5-52,58-61,63-119,129-130,140,143,157,160-161
+  s_18cf6ee2b24796::t_8da36073429c0a 53-57,62
+tests/smoke/tree-crdt-fuzz.mjs
+  s_18cf6ee2b24796::t_776143658230d6 1-281
+tests/smoke/tree-crdt-opaque-ids.mjs
+  s_18cf6ee2b24796::t_04e4ac8b6342a7 117-122,127
+  s_18cf6ee2b24796::t_b798bb8154053a 131
+  s_18cf6ee2b24796::t_d86b96b6ebdb65 1-116,123-126,128-130,132-141
+tests/smoke/tree-crdt-phase2.mjs
+  s_18cf6ee2b24796::t_45cda890712880 1-215
+core/rs/bundle/Cargo.toml
+  s_18cf6ee2b24796::t_a6715360a637ef 36,43,50
+  s_18cf6ee2b24796::t_d9dc069ce208f4 18
+core/rs/bundle/src/lib.rs
+  s_18cf6ee2b24796::t_97f237d34338a8 17
+  s_18cf6ee2b24796::t_4dcca61edd28d8 72
+  s_18cf6ee2b24796::t_9ea68ea5373551 73-76
+core/rs/tree-crdt-kleppmann/src/value.rs
+  s_18cf6ee2b24796::t_893cdec3b25550 1-3,5-53,57-65
+  s_18cf6ee2b24796::t_cd1d572203b118 4
+  s_18cf6ee2b24796::t_1df18acd81fe5f 54-56
+core/rs/tree-crdt-kleppmann/src/lib.rs
+  s_18cf6ee2b24796::t_fa3603a9af16f4 1-95
+core/rs/tree-crdt-kleppmann/src/util.rs
+  s_18cf6ee2b24796::t_42b58e8d62102b 1-58
+core/rs/tree-crdt-kleppmann/src/move_op.rs
+  s_18cf6ee2b24796::t_34a29440755456 1-3,5-15,18-36,51-74,86-92
+  s_18cf6ee2b24796::t_9f594cb6e2329a 4,16-17,37-50,75-85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "a17181a85420d61073c94d89ea15100c155dd0f2",
+  "prompts": {},
+  "sessions": {
+    "s_18cf6ee2b24796": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4e994a1d-8cd6-4fb7-928c-47b6a6c674c5",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
