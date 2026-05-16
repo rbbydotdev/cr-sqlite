@@ -14,6 +14,7 @@ use crsql_core::sqlite3_crsqlcore_init;
 pub use crsql_core::test_exports;
 use crsql_fractindex_core::sqlite3_crsqlfractionalindex_init;
 use crsql_text_crdt_fugue::sqlite3_crsqltextcrdtfugue_init;
+use crsql_tree_crdt_kleppmann::sqlite3_crsqltreecrdtkleppmann_init;
 #[cfg(feature = "test")]
 use libc_print::std_name::println;
 use sqlite_nostd as sqlite;
@@ -64,6 +65,11 @@ pub extern "C" fn sqlite3_crsqlrustbundle_init(
     }
 
     let rc = sqlite3_crsqltextcrdtfugue_init(db, err_msg, api);
+    if rc != 0 {
+        return core::ptr::null_mut();
+    }
+
+    let rc = sqlite3_crsqltreecrdtkleppmann_init(db, err_msg, api);
     if rc != 0 {
         return core::ptr::null_mut();
     }

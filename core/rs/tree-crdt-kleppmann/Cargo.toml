@@ -1,0 +1,24 @@
+[package]
+name = "crsql_tree_crdt_kleppmann"
+version = "0.1.0"
+edition = "2021"
+keywords = ["sqlite", "cr-sqlite", "crdt", "tree", "kleppmann"]
+license = "Apache 2"
+
+[lib]
+name = "crsql_tree_crdt_kleppmann"
+crate-type = ["rlib"]
+
+[dependencies]
+sqlite_nostd = { path="../sqlite-rs-embedded/sqlite_nostd" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[features]
+loadable_extension = ["sqlite_nostd/loadable_extension"]
+static = ["sqlite_nostd/static"]
+omit_load_extension = ["sqlite_nostd/omit_load_extension"]
