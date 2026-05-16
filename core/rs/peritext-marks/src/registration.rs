@@ -173,6 +173,10 @@ fn install_render_triggers(
     // Resolve the parent table's PK column so the trigger can match rows.
     let pk_col = parent_pk_column(db, table)?;
     let pk_col_esc = escape_ident(&pk_col);
+    // Hoisted aliases for use in both marks-table and parent-table triggers.
+    let parent_esc = escape_ident(table);
+    let col_esc = escape_ident(column);
+    let pk_col_esc_clone = escape_ident(&pk_col);
 
     // Trigger body: project portable-text JSON via the render UDF and
     // write it into the parent column.
@@ -189,25 +193,46 @@ fn install_render_triggers(
         )
     };
 
-    // Marks-table triggers: ungated, mark ops arrive one at a time. On
-    // any insert/update/delete, refresh the parent column's JSON.
-    for (event, pk_ref, suffix) in &[
-        ("INSERT", "NEW.row_pk", "ai"),
-        ("UPDATE", "NEW.row_pk", "au"),
-        ("DELETE", "OLD.row_pk", "ad"),
+    // Marks-table triggers: invalidate the parent column's JSON so the
+    // notes-table trigger picks up "non-JSON content" and re-renders.
+    //
+    // Why indirect? Calling crsql_peritext_render directly from the marks-
+    // table trigger fails during cr-sqlite's per-cell apply path with a
+    // generic "SQL logic error" — re-entering the same CRR table for a
+    // SELECT inside a trigger fired by `INSERT INTO crsql_changes` trips
+    // up cr-sqlite's apply machinery. Setting body='' is a side-effect-
+    // only write that the notes-trigger then promotes to JSON.
+    //
+    // Note: this means during apply of a remote mark, body becomes ''
+    // briefly between the marks-trigger and notes-trigger fires. Both
+    // run in the same statement / transaction, so external readers
+    // never observe the empty intermediate value at commit.
+    let invalidate_body = format!(
+        "UPDATE \"{parent}\" SET \"{col}\" = '' \
+         WHERE \"{pk}\" = {{pk}} AND substr(\"{col}\", 1, 1) = '['",
+        parent = parent_esc,
+        col = col_esc,
+        pk = pk_col_esc_clone,
+    );
+    for (event, pk_ref, suffix, when) in &[
+        ("INSERT", "NEW.row_pk", "ai", " WHEN NEW.row_pk IS NOT NULL"),
+        ("UPDATE", "NEW.row_pk", "au", " WHEN NEW.row_pk IS NOT NULL"),
+        ("DELETE", "OLD.row_pk", "ad", " WHEN OLD.row_pk IS NOT NULL"),
     ] {
-        let trig_name = format!("{marks}__render_{suffix}");
+        let body = invalidate_body.replace("{pk}", pk_ref);
+        let trig_name = format!("{marks}__invalidate_{suffix}");
         let sql = format!(
             "CREATE TRIGGER IF NOT EXISTS \"{trig}\" \
-             AFTER {event} ON \"{marks}\" BEGIN {body}; END",
+             AFTER {event} ON \"{marks}\"{when} BEGIN {body}; END",
             trig = escape_ident(&trig_name),
             event = event,
             marks = marks_esc,
-            body = render_body(pk_ref),
+            when = when,
+            body = body,
         );
         db.exec_safe(&sql).map_err(|_| {
             format!(
-                "failed to install AFTER {} render trigger on {}",
+                "failed to install AFTER {} invalidate trigger on {}",
                 event, marks
             )
         })?;
@@ -222,10 +247,6 @@ fn install_render_triggers(
     // INSERT into the parent. WHEN guard prevents infinite recursion:
     // if the column already holds JSON (starts with '['), skip.
     let _ = backing_esc; // suppress unused warning now that backing triggers are gone
-
-    let parent_esc = escape_ident(table);
-    let col_esc = escape_ident(column);
-    let pk_col_esc_clone = escape_ident(&pk_col);
 
     let upgrade_body = format!(
         "UPDATE \"{parent}\" SET \"{col}\" = crsql_peritext_render('{ptab}', '{pcol}', NEW.\"{pk}\") \

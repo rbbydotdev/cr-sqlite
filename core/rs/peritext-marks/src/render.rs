@@ -315,27 +315,33 @@ fn load_marks(
     loop {
         match stmt.step().map_err(|_| String::from("step load_marks"))? {
             ResultCode::ROW => {
+                // Mid-apply tolerance: cr-sqlite ships changes per-cell, so the
+                // marks row exists with partial columns during sync-apply. Skip
+                // rows where any critical anchor column is still NULL — they'll
+                // contribute correctly on a later trigger fire once the row is
+                // fully populated.
+                let start_item = match stmt.column_text(2) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let end_item = match stmt.column_text(5) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let mark_name = match stmt.column_text(8) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+
                 let ts = stmt.column_int64(0);
                 let actor = match stmt.column_blob(1) {
                     Ok(b) => Vec::from(b),
-                    Err(_) => Vec::new(),
+                    Err(_) => continue,
                 };
-                let start_item = String::from(
-                    stmt.column_text(2)
-                        .map_err(|_| String::from("read start_item"))?,
-                );
                 let start_idx = stmt.column_int(3);
                 let start_side = stmt.column_int64(4);
-                let end_item = String::from(
-                    stmt.column_text(5)
-                        .map_err(|_| String::from("read end_item"))?,
-                );
                 let end_idx = stmt.column_int(6);
                 let end_side = stmt.column_int64(7);
-                let mark_name = String::from(
-                    stmt.column_text(8)
-                        .map_err(|_| String::from("read mark_name"))?,
-                );
                 let value = column_to_value_repr(&stmt, 9)?;
                 let is_add = stmt.column_int64(10) != 0;
 
@@ -344,13 +350,13 @@ fn load_marks(
                         lamport_ts: ts,
                         actor,
                     },
-                    start_item,
+                    start_item: String::from(start_item),
                     start_idx,
                     start_side,
-                    end_item,
+                    end_item: String::from(end_item),
                     end_idx,
                     end_side,
-                    mark_name,
+                    mark_name: String::from(mark_name),
                     value,
                     is_add,
                 });
