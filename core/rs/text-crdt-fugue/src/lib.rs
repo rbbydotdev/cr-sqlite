@@ -12,8 +12,16 @@ mod deletion;
 mod insertion;
 mod registration;
 mod render;
-mod row_pk;
+// `pub` so peritext-marks (and other downstream layers) can share the
+// canonical row_pk encoding used in the Fugue backing table. The encoding
+// is tag-prefixed bytes (TAG_INT/TAG_TEXT/TAG_BLOB + payload) — consumers
+// must agree byte-for-byte for queries to match.
+pub mod row_pk;
 mod util;
+
+// Re-export the few names peritext-marks needs from `util`. Avoids
+// promoting the whole module — most helpers in there are crate-private.
+pub use util::{backing_table_name, escape_ident};
 
 use core::ffi::{c_char, c_int};
 use sqlite::Connection;

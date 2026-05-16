@@ -93,6 +93,7 @@ version = "0.1.0"
 dependencies = [
  "crsql_core",
  "crsql_fractindex_core",
+ "crsql_peritext_marks",
  "crsql_text_crdt_fugue",
  "crsql_tree_crdt_kleppmann",
  "libc-print",
@@ -121,6 +122,14 @@ dependencies = [
 name = "crsql_fractindex_core"
 version = "0.1.0"
 dependencies = [
+ "sqlite_nostd",
+]
+
+[[package]]
+name = "crsql_peritext_marks"
+version = "0.1.0"
+dependencies = [
+ "crsql_text_crdt_fugue",
  "sqlite_nostd",
 ]
 

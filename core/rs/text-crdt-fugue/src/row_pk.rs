@@ -34,7 +34,10 @@ pub(crate) const TAG_BLOB: u8 = 0x03;
 
 /// Encode a sqlite3_value (from a UDF argument) into the canonical row_pk
 /// form. Errors on NULL/REAL — primary keys can't be either.
-pub(crate) fn from_value(v: *mut value) -> Result<Vec<u8>, String> {
+///
+/// Public so downstream layers (peritext-marks) can encode row_pks the
+/// same way and have their query bindings match Fugue backing rows.
+pub fn from_value(v: *mut value) -> Result<Vec<u8>, String> {
     if v.is_null() {
         return Err(String::from("row_pk argument is null pointer"));
     }
@@ -86,7 +89,9 @@ pub(crate) fn from_blob(b: &[u8]) -> Vec<u8> {
 /// Bind a canonical row_pk to a prepared statement parameter, decoding the
 /// tag and dispatching to the right typed bind so the value lands in the
 /// backing table as INTEGER / TEXT / BLOB respectively.
-pub(crate) fn bind(
+///
+/// Public for the same reason as `from_value`.
+pub fn bind(
     stmt: &ManagedStmt,
     idx: i32,
     pk: &[u8],

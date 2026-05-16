@@ -16,6 +16,7 @@ crate-type = ["rlib"]
 crsql_fractindex_core = {path="../fractindex-core"}
 crsql_text_crdt_fugue = {path="../text-crdt-fugue"}
 crsql_tree_crdt_kleppmann = {path="../tree-crdt-kleppmann"}
+crsql_peritext_marks = {path="../peritext-marks"}
 crsql_core = { path="../core" }
 sqlite_nostd = { path="../sqlite-rs-embedded/sqlite_nostd" }
 libc-print = "*"
@@ -34,6 +35,7 @@ loadable_extension = [
   "crsql_fractindex_core/loadable_extension",
   "crsql_text_crdt_fugue/loadable_extension",
   "crsql_tree_crdt_kleppmann/loadable_extension",
+  "crsql_peritext_marks/loadable_extension",
   "crsql_core/loadable_extension"
 ]
 static = [
@@ -41,6 +43,7 @@ static = [
   "crsql_fractindex_core/static",
   "crsql_text_crdt_fugue/static",
   "crsql_tree_crdt_kleppmann/static",
+  "crsql_peritext_marks/static",
   "crsql_core/static"
 ]
 omit_load_extension = [
@@ -48,6 +51,7 @@ omit_load_extension = [
   "crsql_fractindex_core/omit_load_extension",
   "crsql_text_crdt_fugue/omit_load_extension",
   "crsql_tree_crdt_kleppmann/omit_load_extension",
+  "crsql_peritext_marks/omit_load_extension",
   "crsql_core/omit_load_extension"
 ]
 # Forwards the text-CRDT crate's `debug-monitor` feature. Adds the

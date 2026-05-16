@@ -1,0 +1,36 @@
+[package]
+name = "crsql_peritext_marks"
+version = "0.1.0"
+edition = "2021"
+keywords = ["sqlite", "cr-sqlite", "crdt", "peritext", "richtext"]
+license = "Apache 2"
+
+[lib]
+name = "crsql_peritext_marks"
+crate-type = ["rlib"]
+
+[dependencies]
+sqlite_nostd = { path="../sqlite-rs-embedded/sqlite_nostd" }
+# Share the row_pk canonical encoding + util helpers (backing_table_name,
+# escape_ident). Re-exported from text-crdt-fugue's lib.rs.
+crsql_text_crdt_fugue = { path="../text-crdt-fugue" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[features]
+loadable_extension = [
+    "sqlite_nostd/loadable_extension",
+    "crsql_text_crdt_fugue/loadable_extension",
+]
+static = [
+    "sqlite_nostd/static",
+    "crsql_text_crdt_fugue/static",
+]
+omit_load_extension = [
+    "sqlite_nostd/omit_load_extension",
+    "crsql_text_crdt_fugue/omit_load_extension",
+]
