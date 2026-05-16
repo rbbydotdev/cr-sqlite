@@ -1,0 +1,19 @@
+tests/smoke/peritext-fuzz.mjs
+  s_18cf6ee2b24796::t_62f3828eeb317a 1-299
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "39f3c178151a8d608e8a8dee5711700dc11ace85",
+  "prompts": {},
+  "sessions": {
+    "s_18cf6ee2b24796": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4e994a1d-8cd6-4fb7-928c-47b6a6c674c5",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
