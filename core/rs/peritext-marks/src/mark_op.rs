@@ -118,31 +118,66 @@ fn insert_mark_op(
         }
     };
 
-    // Resolve positions to anchors (item, idx, side).
-    // pos=0 → (ANCHOR_START, -1, after) — caller's side ignored at boundary
-    // pos=len → (ANCHOR_END, -1, before) — caller's side ignored at boundary
-    // 0 < pos < len → (visibles[pos].item_id, visibles[pos].idx, caller's side)
+    // Resolve positions to anchors. The rule:
+    //   side=BEFORE → anchor references the char *ahead* of the boundary
+    //                  (sticky-forward; mark grows when text inserted at boundary)
+    //   side=AFTER  → anchor references the char *behind* the boundary
+    //                  (sticky-back; mark does NOT grow at boundary)
+    //
+    // Start anchor (boundary between char P-1 and char P, where range covers [P, end_pos)):
+    //   BEFORE → char at P
+    //   AFTER  → char at P-1   (or ANCHOR_START if P == 0)
+    //
+    // End anchor (boundary between char end_pos-1 and char end_pos):
+    //   BEFORE → char at end_pos  (or ANCHOR_END if end_pos == len)
+    //   AFTER  → char at end_pos-1
     let len = visibles.len() as i64;
-    let (start_item, start_idx, start_side_resolved) = if start_pos == 0 {
-        (String::from(ANCHOR_START), -1i32, SIDE_AFTER)
-    } else if start_pos >= len {
-        ctx.result_error(&format!(
-            "start_pos {} out of range (doc length {})",
-            start_pos, len
-        ));
-        return;
+
+    let (start_item, start_idx, start_side_resolved) = if start_side == SIDE_AFTER {
+        if start_pos == 0 {
+            (String::from(ANCHOR_START), -1i32, SIDE_AFTER)
+        } else if (start_pos as usize) - 1 < visibles.len() {
+            let v = &visibles[(start_pos - 1) as usize];
+            (v.item_id.clone(), v.idx, SIDE_AFTER)
+        } else {
+            ctx.result_error(&format!("start_pos {} out of range", start_pos));
+            return;
+        }
     } else {
-        let v = &visibles[start_pos as usize];
-        (v.item_id.clone(), v.idx, start_side)
+        // SIDE_BEFORE
+        if (start_pos as usize) < visibles.len() {
+            let v = &visibles[start_pos as usize];
+            (v.item_id.clone(), v.idx, SIDE_BEFORE)
+        } else if start_pos == 0 {
+            // Empty doc — degenerate, use ANCHOR_START
+            (String::from(ANCHOR_START), -1i32, SIDE_AFTER)
+        } else {
+            ctx.result_error(&format!(
+                "start_pos {} out of range (doc length {})",
+                start_pos, len
+            ));
+            return;
+        }
     };
 
-    let (end_item, end_idx, end_side_resolved) = if end_pos >= len {
-        (String::from(ANCHOR_END), -1i32, SIDE_BEFORE)
-    } else if end_pos == 0 {
-        return;
+    let (end_item, end_idx, end_side_resolved) = if end_side == SIDE_AFTER {
+        // end_pos > 0 (guaranteed by start_pos < end_pos check above)
+        if (end_pos as usize) - 1 < visibles.len() {
+            let v = &visibles[(end_pos - 1) as usize];
+            (v.item_id.clone(), v.idx, SIDE_AFTER)
+        } else {
+            ctx.result_error(&format!("end_pos {} out of range", end_pos));
+            return;
+        }
     } else {
-        let v = &visibles[end_pos as usize];
-        (v.item_id.clone(), v.idx, end_side)
+        // SIDE_BEFORE
+        if (end_pos as usize) < visibles.len() {
+            let v = &visibles[end_pos as usize];
+            (v.item_id.clone(), v.idx, SIDE_BEFORE)
+        } else {
+            // end_pos == len → ANCHOR_END
+            (String::from(ANCHOR_END), -1i32, SIDE_BEFORE)
+        }
     };
 
     let marks = marks_table_name(table, column);
