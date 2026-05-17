@@ -510,8 +510,35 @@ function clearHistory() {
   HISTORY.length = 0;
   playback.current = null;
   if (historyTbody) historyTbody.innerHTML = "";
-  // Stay in current mode (live or scrubbing); user expects this to
-  // just clear the table without disrupting their editor state.
+
+  // Exit scrubbing so the new log starts from live state and the editor
+  // resumes engine-truth display. Otherwise the user could clear while
+  // viewing a past row and the first real event after clear would be
+  // captured against a stale `engineMarkdown`-vs-textarea mix.
+  if (scrubbing) {
+    setScrubbing(false);
+    for (const p of world.peers) {
+      const md = p.engineMarkdown ?? "";
+      if (p.editor) { p.editor.value = md; p.lastMarkdown = md; }
+      if (p.preview) {
+        try { p.preview.innerHTML = toHtml(toHast(fromMarkdown(md))); } catch (_) {}
+      }
+    }
+  }
+
+  // Seed the fresh log with one baseline row per peer capturing their
+  // current online state + engine markdown. Without this, the next real
+  // event is unanchored — you can't tell from the cleared log whether
+  // B was offline going into the next sync, or what the doc started as.
+  for (const p of world.peers) {
+    captureEvent(
+      p,
+      p.online ? "baseline" : "baseline·offline",
+      `peer ${p.label}: ${p.online ? "online" : "offline"} · md=${
+        (p.engineMarkdown ?? "").length
+      } chars`,
+    );
+  }
 }
 
 async function copyHistory() {
