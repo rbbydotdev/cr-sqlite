@@ -1,135 +1,101 @@
 // doc-wrapper · collaborative markdown demo
 //
-// Architecture: dumb shell. Frontend knows MARKDOWN (via marked.js) and
-// nothing else. Engine handles CRDT — it speaks neutral block-tree JSON.
+// Architecture: dumb shell. Library does parsing/serialization/HTML; we
+// just translate between mdast (the standard markdown AST) and the
+// engine's flat block-tree wire format.
 //
 //   textarea (raw markdown)
-//        ↓ marked.lex
-//   tokens (marked.js shape)
-//        ↓ tokensToTree
+//        ↓ fromMarkdown   (unified · mdast-util-from-markdown)
+//   mdast
+//        ↓ mdastToTree    (this file — small adapter, ~40 LOC)
 //   neutral tree JSON  [{kind, spans:[{text, marks}]}, ...]
 //        ↓ crsql_doc_apply
 //   engine (tree-CRDT + Peritext + Fugue) handles ops + sync
 //        ↓ crsql_doc_render
 //   neutral tree JSON
-//        ↓ treeToMarkdown
-//   markdown text → textarea (when not focused)
+//        ↓ treeToMdast    (this file — inverse adapter)
+//   mdast
+//        ↓ toMarkdown     (mdast-util-to-markdown) → textarea
+//        ↓ toHast + toHtml (mdast-util-to-hast + hast-util-to-html) → preview
 //
-// Frontend never says "Peritext", "block", "mark", "tree". Only knows
-// markdown ↔ neutral-tree.
+// Frontend never says "Peritext", "block", "mark", or "tree" except as
+// opaque shapes in the wire JSON. All markdown grammar/output handled
+// by the unified ecosystem.
 
-// marked owns parsing AND HTML rendering. We use lexer for the structured
-// path into the engine and parse for the display path. Zero custom HTML/
-// markdown logic in this file other than the tree ↔ tokens adapters.
-import { lexer as marked_lexer, parse as marked_parse } from "./vendor/marked.esm.js";
+import {
+  fromMarkdown,
+  toMarkdown,
+  toHast,
+  toHtml,
+} from "./vendor/unified.esm.js";
 import { initWasm } from "./vendor/loader.js";
 
 const PEER_HUES = [200, 320, 90, 30, 260, 180, 350, 130];
 let sqlite = null;
 const world = { peers: [], nextSlot: 0 };
 
-// ── markdown ↔ neutral-tree adapter ──────────────────────────────────
+// ── mdast ↔ neutral-tree adapters ────────────────────────────────────
 
-function tokensToTree(tokens) {
-  // Walk top-level marked tokens; flatten into block list with kind/spans.
+function mdastToTree(root) {
   const blocks = [];
-  for (const t of tokens) {
-    if (t.type === "space") continue;
-    blocks.push(...tokenToBlocks(t));
-  }
+  for (const node of root.children ?? []) blocks.push(...nodeToBlocks(node));
   return blocks;
 }
 
-function tokenToBlocks(t) {
-  switch (t.type) {
-    case "heading": {
-      const kind =
-        t.depth === 1 ? "heading-1" :
-        t.depth === 2 ? "heading-2" :
-        "heading-3";
-      return [{ kind, spans: inlineSpans(t.tokens ?? [{ type: "text", text: t.text }]) }];
-    }
+function nodeToBlocks(n) {
+  switch (n.type) {
+    case "heading":
+      return [{ kind: `heading-${Math.min(n.depth, 3)}`, spans: inlineSpans(n.children) }];
     case "paragraph":
-      return [{ kind: "paragraph", spans: inlineSpans(t.tokens ?? [{ type: "text", text: t.text }]) }];
-    case "blockquote":
-      // Flatten blockquote children — model each contained line/paragraph
-      // as a separate `quote` block. Nested structure is out of scope.
-      return (t.tokens ?? []).flatMap((c) =>
-        tokenToBlocks(c).map((b) => ({ ...b, kind: "quote" })),
-      );
+      return [{ kind: "paragraph", spans: inlineSpans(n.children) }];
     case "list":
-      return (t.items ?? []).flatMap((it) => itemToBlocks(it, t.ordered));
+      return (n.children ?? []).flatMap((it) => listItemToBlocks(it, n.ordered));
+    case "blockquote":
+      return (n.children ?? []).flatMap((c) =>
+        nodeToBlocks(c).map((b) => ({ ...b, kind: "quote" }))
+      );
     case "code":
-      return [{ kind: "code", spans: [{ text: t.text ?? "", marks: [] }] }];
-    case "hr":
+      return [{ kind: "code", spans: [{ text: n.value ?? "", marks: [] }] }];
+    case "thematicBreak":
       return [{ kind: "hr", spans: [] }];
     case "html":
-    case "text":
-      return [{ kind: "paragraph", spans: inlineSpans(t.tokens ?? [{ type: "text", text: t.text }]) }];
+      return [{ kind: "paragraph", spans: [{ text: n.value ?? "", marks: [] }] }];
     default:
-      return [{ kind: "paragraph", spans: [{ text: t.raw ?? "", marks: [] }] }];
+      return [];
   }
 }
 
-function itemToBlocks(item, ordered) {
+function listItemToBlocks(item, ordered) {
   const kind = ordered ? "list-item-ord" : "list-item";
-  // marked nests further blocks inside list items. Flatten: emit one
-  // list-item block for the item text, then any nested blocks as siblings.
-  const tokens = item.tokens ?? [];
+  // Flatten: each text-bearing child becomes a sibling list-item block;
+  // nested blocks (code, sublists) emit on their own.
   const out = [];
-  let leading = [];
-  for (const ct of tokens) {
-    if (ct.type === "text" || ct.type === "paragraph") {
-      leading.push(...inlineSpans(ct.tokens ?? [{ type: "text", text: ct.text }]));
+  for (const c of item.children ?? []) {
+    if (c.type === "paragraph") {
+      out.push({ kind, spans: inlineSpans(c.children) });
     } else {
-      if (leading.length) {
-        out.push({ kind, spans: leading });
-        leading = [];
-      }
-      out.push(...tokenToBlocks(ct));
+      out.push(...nodeToBlocks(c));
     }
   }
-  if (leading.length || out.length === 0) {
-    out.push({ kind, spans: leading });
-  }
+  if (!out.length) out.push({ kind, spans: [] });
   return out;
 }
 
-// Inline tokens → spans with marks. marked's inline types: text, strong,
-// em, codespan, link, image, br. We support text/strong/em/codespan/link.
-function inlineSpans(tokens) {
+function inlineSpans(children) {
   const spans = [];
-  walkInline(tokens, [], spans);
+  walkInline(children ?? [], [], spans);
   return mergeAdjacent(spans);
 }
 
-function walkInline(tokens, marks, out) {
-  for (const t of tokens) {
-    switch (t.type) {
-      case "text":
-        out.push({ text: t.text ?? "", marks: marks.slice() });
-        break;
-      case "strong":
-        walkInline(t.tokens ?? [{ type: "text", text: t.text }], [...marks, { name: "bold" }], out);
-        break;
-      case "em":
-        walkInline(t.tokens ?? [{ type: "text", text: t.text }], [...marks, { name: "italic" }], out);
-        break;
-      case "codespan":
-        out.push({ text: t.text ?? "", marks: [...marks, { name: "code" }] });
-        break;
-      case "link":
-        walkInline(
-          t.tokens ?? [{ type: "text", text: t.text }],
-          [...marks, { name: "link", value: t.href ?? "" }],
-          out,
-        );
-        break;
-      case "br":
-        out.push({ text: "\n", marks: marks.slice() });
-        break;
-      default:
-        if (t.raw) out.push({ text: t.raw, marks: marks.slice() });
+function walkInline(nodes, marks, out) {
+  for (const n of nodes) {
+    switch (n.type) {
+      case "text":       out.push({ text: n.value ?? "", marks: marks.slice() }); break;
+      case "strong":     walkInline(n.children, [...marks, { name: "bold" }],   out); break;
+      case "emphasis":   walkInline(n.children, [...marks, { name: "italic" }], out); break;
+      case "inlineCode": out.push({ text: n.value ?? "", marks: [...marks, { name: "code" }] }); break;
+      case "link":       walkInline(n.children, [...marks, { name: "link", value: n.url ?? "" }], out); break;
+      case "break":      out.push({ text: "\n", marks: marks.slice() }); break;
     }
   }
 }
@@ -139,58 +105,70 @@ function mergeAdjacent(spans) {
   for (const s of spans) {
     if (!s.text) continue;
     const last = out[out.length - 1];
-    if (last && marksEqual(last.marks, s.marks)) {
-      last.text += s.text;
-    } else {
-      out.push({ ...s });
-    }
+    if (last && marksEqual(last.marks, s.marks)) last.text += s.text;
+    else out.push({ ...s });
   }
   return out;
 }
 function marksEqual(a, b) {
-  if (a.length !== b.length) return false;
+  if ((a?.length ?? 0) !== (b?.length ?? 0)) return false;
   const norm = (m) => `${m.name}|${m.value ?? ""}`;
-  const as = a.map(norm).sort();
-  const bs = b.map(norm).sort();
-  return as.every((v, i) => v === bs[i]);
+  const sa = (a ?? []).map(norm).sort();
+  const sb = (b ?? []).map(norm).sort();
+  return sa.every((v, i) => v === sb[i]);
 }
 
-// Neutral tree → markdown source.
-function treeToMarkdown(blocks) {
-  const lines = [];
-  for (const b of blocks) {
-    const text = spansToMarkdown(b.spans ?? []);
-    switch (b.kind) {
-      case "heading-1": lines.push(`# ${text}`); break;
-      case "heading-2": lines.push(`## ${text}`); break;
-      case "heading-3": lines.push(`### ${text}`); break;
-      case "list-item": lines.push(`- ${text}`); break;
-      case "list-item-ord": lines.push(`1. ${text}`); break;
-      case "quote": lines.push(`> ${text}`); break;
-      case "code": lines.push("```\n" + text + "\n```"); break;
-      case "hr": lines.push("---"); break;
-      default: lines.push(text);
+// Inverse: neutral tree → mdast. Group consecutive list-item blocks into
+// one `list` node so the serializer emits a single markdown list.
+function treeToMdast(tree) {
+  const children = [];
+  let listBuf = null;
+  for (const b of tree) {
+    const isItem = b.kind === "list-item" || b.kind === "list-item-ord";
+    if (isItem) {
+      const ordered = b.kind === "list-item-ord";
+      if (!listBuf || listBuf.ordered !== ordered) {
+        if (listBuf) children.push(listBuf);
+        listBuf = { type: "list", ordered, spread: false, children: [] };
+      }
+      listBuf.children.push({
+        type: "listItem",
+        spread: false,
+        children: [{ type: "paragraph", children: spansToMdast(b.spans) }],
+      });
+    } else {
+      if (listBuf) { children.push(listBuf); listBuf = null; }
+      children.push(blockToMdast(b));
     }
   }
-  return lines.join("\n\n");
+  if (listBuf) children.push(listBuf);
+  return { type: "root", children };
 }
 
-// Convert engine's spans (marks-as-object) → markdown text with **/`/etc.
-function spansToMarkdown(spans) {
-  let out = "";
-  for (const s of spans) {
-    let txt = s.text ?? "";
-    const marks = s.marks || {};
-    // wrap order: code outermost (no recursion), then link, then strong, then em
-    if (marks.code) txt = "`" + txt + "`";
-    else {
-      if (marks.italic) txt = `*${txt}*`;
-      if (marks.bold) txt = `**${txt}**`;
-      if (marks.link) txt = `[${txt}](${typeof marks.link === "string" ? marks.link : ""})`;
-    }
-    out += txt;
+function blockToMdast(b) {
+  const inline = spansToMdast(b.spans);
+  switch (b.kind) {
+    case "heading-1": return { type: "heading", depth: 1, children: inline };
+    case "heading-2": return { type: "heading", depth: 2, children: inline };
+    case "heading-3": return { type: "heading", depth: 3, children: inline };
+    case "quote":     return { type: "blockquote", children: [{ type: "paragraph", children: inline }] };
+    case "code":      return { type: "code", lang: null, meta: null, value: (b.spans ?? []).map((s) => s.text).join("") };
+    case "hr":        return { type: "thematicBreak" };
+    default:          return { type: "paragraph", children: inline };
   }
-  return out;
+}
+
+function spansToMdast(spans) {
+  return (spans ?? []).flatMap(spanToMdast);
+}
+function spanToMdast(s) {
+  const marks = s.marks || {};
+  if (marks.code) return [{ type: "inlineCode", value: s.text ?? "" }];
+  let node = { type: "text", value: s.text ?? "" };
+  if (marks.italic) node = { type: "emphasis", children: [node] };
+  if (marks.bold)   node = { type: "strong",   children: [node] };
+  if (marks.link)   node = { type: "link", url: typeof marks.link === "string" ? marks.link : "", children: [node] };
+  return [node];
 }
 
 // ── Peer ─────────────────────────────────────────────────────────────
@@ -231,27 +209,29 @@ class Peer {
     const md = this.editor.value;
     if (md === this.lastMarkdown) return;
     this.lastMarkdown = md;
-    const tree = tokensToTree(marked_lexer(md));
+    const mdast = fromMarkdown(md);
+    const tree = mdastToTree(mdast);
     await this.db.exec("SELECT crsql_doc_apply(?)", [JSON.stringify(tree)]);
-    this._renderPreview(md);
+    this._renderPreview(mdast);
     this._dumpState(tree);
   }
 
-  // Pull engine state into the textarea (only when user isn't typing).
   async refreshFromEngine() {
     const treeJson = (await this.db.execA("SELECT crsql_doc_render()"))[0]?.[0] ?? "[]";
     const tree = JSON.parse(treeJson);
-    const md = treeToMarkdown(tree);
+    const mdast = treeToMdast(tree);
+    const md = toMarkdown(mdast);
     if (md !== this.editor.value && document.activeElement !== this.editor) {
       this.editor.value = md;
       this.lastMarkdown = md;
     }
-    this._renderPreview(md);
+    this._renderPreview(mdast);
     this._dumpState(tree);
   }
 
-  _renderPreview(md) {
-    if (this.preview) this.preview.innerHTML = marked_parse(md);
+  _renderPreview(mdast) {
+    if (!this.preview) return;
+    this.preview.innerHTML = toHtml(toHast(mdast));
   }
 
   _dumpState(tree) {
@@ -266,7 +246,6 @@ class Peer {
     this.online = online;
     this._renderHeader();
   }
-
   _renderHeader() {
     if (!this.el) return;
     this.el.classList.toggle("offline", !this.online);
