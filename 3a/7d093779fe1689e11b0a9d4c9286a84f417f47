@@ -1,0 +1,23 @@
+web/rich.html
+  s_18cf6ee2b24796::t_fc21b7812e3d28 1-209
+Makefile
+  s_18cf6ee2b24796::t_11fed5fab797d9 44-55,69-79
+web/rich.js
+  s_18cf6ee2b24796::t_95d7c82cdd3171 1-635
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "3a7d093779fe1689e11b0a9d4c9286a84f417f47",
+  "prompts": {},
+  "sessions": {
+    "s_18cf6ee2b24796": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4e994a1d-8cd6-4fb7-928c-47b6a6c674c5",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
