@@ -135,6 +135,28 @@ fn register(
     stmt.step()
         .map_err(|_| String::from("step meta upsert"))?;
 
+    // Opt this column out of text-CRDT-fugue's O(1) append fast-path.
+    // The fast-path does `body = body || ?` directly, which corrupts
+    // the JSON we store here. With this row present, Fugue falls
+    // through to its canonical rerender path — body is overwritten in
+    // full each insert, and the parent-table trigger below catches it
+    // and projects to JSON.
+    let opt_out = db
+        .prepare_v2(
+            "INSERT OR IGNORE INTO __crsql_fugue_no_fast_path \
+                 (parent_table, parent_column) VALUES (?, ?)",
+        )
+        .map_err(|_| String::from("prepare no_fast_path upsert"))?;
+    opt_out
+        .bind_text(1, table, Destructor::TRANSIENT)
+        .map_err(|_| String::from("bind no_fast_path table"))?;
+    opt_out
+        .bind_text(2, column, Destructor::TRANSIENT)
+        .map_err(|_| String::from("bind no_fast_path column"))?;
+    opt_out
+        .step()
+        .map_err(|_| String::from("step no_fast_path upsert"))?;
+
     // 4. Render triggers. Two sources fire re-render of the parent column:
     //    (a) marks-table changes (this layer's ops)
     //    (b) Fugue backing-table changes (text edits, sync-apply of remote chars)
@@ -258,19 +280,23 @@ fn install_render_triggers(
         pk = pk_col_esc_clone,
     );
 
-    // WHEN clause: trigger fires when body isn't a well-formed JSON
-    // array. Our render output is always `[...]` — starts with '[' AND
-    // ends with ']'. We require BOTH conditions because text-CRDT-fugue's
-    // O(1) append fast-path does `UPDATE body = body || ?` directly, so
-    // after a tail-append the body still starts with `[` (the old JSON
-    // prefix) but is no longer terminated by `]` — without the trailing
-    // check, the trigger would mistake the corrupted JSON-with-suffix
-    // for valid JSON and skip the re-render.
+    // WHEN clause: fire iff body doesn't already equal the canonical
+    // render output. Robust by construction — no string-shape heuristic.
+    //
+    // Termination: my body-UPDATE inside the trigger sets body to
+    // crsql_peritext_render(...). On the re-fire NEW.body equals the
+    // render output (render is deterministic and idempotent over the
+    // same backing+marks), WHEN is false, no further recursion.
+    //
+    // Cost: two render calls per body-change-that-needs-upgrading (one
+    // in WHEN, one in body). For paragraph-sized content this is
+    // single-digit microseconds; not worth caching for V1.
     let needs_upgrade = format!(
-        "(NEW.\"{col}\" IS NULL OR length(NEW.\"{col}\") = 0 \
-          OR substr(NEW.\"{col}\", 1, 1) != '[' \
-          OR substr(NEW.\"{col}\", length(NEW.\"{col}\"), 1) != ']')",
-        col = col_esc
+        "(NEW.\"{col}\" IS NOT crsql_peritext_render('{ptab}', '{pcol}', NEW.\"{pk}\"))",
+        col = col_esc,
+        ptab = table_lit,
+        pcol = column_lit,
+        pk = pk_col_esc_clone,
     );
 
     let trig_ai = format!("{table}__peritext_render_ai");

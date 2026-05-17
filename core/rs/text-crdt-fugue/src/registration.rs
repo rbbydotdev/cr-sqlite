@@ -132,6 +132,7 @@ fn register(db: *mut sqlite3, table: &str, column: &str) -> Result<(), String> {
     //        rerender_parent_column call renders once. N-row writes → 1 render.
     ensure_active_counter_table(db)?;
     ensure_versions_table(db)?;
+    ensure_no_fast_path_table(db)?;
     // recursive_triggers stays ON so the render trigger's RECURSIVE CTE walks
     // its own re-fire safely under the counter-guarded WHEN clause.
     db.exec_safe("PRAGMA recursive_triggers = ON")
@@ -232,6 +233,54 @@ fn ensure_versions_table(db: *mut sqlite3) -> Result<(), String> {
         )",
     )
     .map_err(|_| String::from("failed to create __crsql_fugue_versions"))?;
+    Ok(())
+}
+
+/// Cheap check used by the insert fast-path entry: is the given
+/// `(parent_table, parent_column)` opted out of the O(1) concat path?
+/// Looks at `__crsql_fugue_no_fast_path` — present row means yes.
+///
+/// Hand-prepared each call; cost is one bound SELECT against a 2-column
+/// table. For typical apps with a handful of CRDT columns total it's
+/// negligible (single-digit microseconds) per insert.
+pub(crate) fn is_fast_path_disabled(
+    db: *mut sqlite3,
+    table: &str,
+    column: &str,
+) -> bool {
+    let stmt = match db.prepare_v2(
+        "SELECT 1 FROM __crsql_fugue_no_fast_path \
+         WHERE parent_table = ? AND parent_column = ? LIMIT 1",
+    ) {
+        Ok(s) => s,
+        Err(_) => return false, // table missing → fast-path enabled (default)
+    };
+    if stmt.bind_text(1, table, Destructor::STATIC).is_err() {
+        return false;
+    }
+    if stmt.bind_text(2, column, Destructor::STATIC).is_err() {
+        return false;
+    }
+    matches!(stmt.step(), Ok(ResultCode::ROW))
+}
+
+/// Opt-out registry for the O(1) append fast-path. The fast-path writes
+/// directly to the parent column via `body = body || ?` — correct when
+/// the column is the canonical rendered text, broken when an upper
+/// layer (Peritext, custom projections) treats the column as something
+/// else. Layers register `(parent_table, parent_column)` here at their
+/// own registration time; `crsql_fugue_insert` checks this table before
+/// taking the fast path and falls through to the canonical
+/// rerender path when present.
+fn ensure_no_fast_path_table(db: *mut sqlite3) -> Result<(), String> {
+    db.exec_safe(
+        "CREATE TABLE IF NOT EXISTS __crsql_fugue_no_fast_path (\
+            parent_table  TEXT NOT NULL,\
+            parent_column TEXT NOT NULL,\
+            PRIMARY KEY (parent_table, parent_column)\
+        )",
+    )
+    .map_err(|_| String::from("failed to create __crsql_fugue_no_fast_path"))?;
     Ok(())
 }
 

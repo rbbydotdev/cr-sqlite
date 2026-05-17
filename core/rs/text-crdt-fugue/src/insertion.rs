@@ -63,8 +63,16 @@ pub fn fugue_insert(
     // to linear total time.
     let mut fast_path_taken = false;
 
+    // Skip cache + fast-path entirely if this column has opted out
+    // (e.g. Peritext writes JSON into `body`, so the fast-path's
+    // `body = body || ?` concat would corrupt it). Falls through to
+    // the canonical full-rerender path. Single-microsecond check.
+    let fast_path_allowed =
+        !crate::registration::is_fast_path_disabled(db, table, column);
+
     let row_pk_ref: &[u8] = &row_pk;
     let result = crate::active::with_active(db, || {
+        if fast_path_allowed {
         if let Some(cache) = unsafe { crate::cache::cache_from_user_data(user_data) } {
             if let Some(mut doc) = cache.get_doc(&backing, row_pk_ref) {
                 let current_version = crate::cache::read_version(db, &backing, row_pk_ref)
@@ -115,6 +123,7 @@ pub fn fugue_insert(
                 }
             }
         }
+        } // end of `if fast_path_allowed`
 
         // Slow path. After it finishes, refresh the cache: keeps existing
         // markers (shifted appropriately) and adds a new one at the insert
