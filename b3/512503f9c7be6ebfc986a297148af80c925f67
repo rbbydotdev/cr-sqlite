@@ -1,0 +1,19 @@
+core/rs/doc-wrapper/src/apply.rs
+  s_18cf6ee2b24796::t_4430ef6c93e767 451-458,466,468-470,472-475,477,482-486,490,493-494,497,503-622
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "b3512503f9c7be6ebfc986a297148af80c925f67",
+  "prompts": {},
+  "sessions": {
+    "s_18cf6ee2b24796": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4e994a1d-8cd6-4fb7-928c-47b6a6c674c5",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
