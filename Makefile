@@ -41,7 +41,18 @@ WA_SQLITE_DIR    = .build-cache/wa-sqlite
 CORE_ABS         = $(abspath core)
 WEB_VENDOR       = web/vendor
 
-wasm: wasm-deps
+# Vendored sqlite amalgamation. wa-sqlite's Makefile normally curls the
+# source tarball from sqlite.org/src/tarball/..., but that endpoint now
+# returns HTML — and remote downloads aren't reproducible anyway. We
+# ship the amalgamation zip in-tree and pre-populate wa-sqlite's
+# `deps/version-3.45.0/{sqlite3.c,sqlite3.h}` before its build runs,
+# which makes the curl recipe skip (output files already present).
+SQLITE_VERSION   = version-3.45.0
+SQLITE_ZIP       = core/deps/sqlite-amalgamation-3450000.zip
+SQLITE_INNER     = sqlite-amalgamation-3450000
+WA_SQLITE_DEPS   = $(WA_SQLITE_DIR)/deps/$(SQLITE_VERSION)
+
+wasm: wasm-deps $(WA_SQLITE_DEPS)/sqlite3.c
 	@echo "==> Building β-flat WASM via wa-sqlite ($(WA_SQLITE_COMMIT))"
 	# wa-sqlite's `dist` target lists `deps` as a prerequisite but `deps` is
 	# declared `.PHONY` with no recipe, so the sqlite tarball never gets
@@ -54,6 +65,18 @@ wasm: wasm-deps
 	cp $(WA_SQLITE_DIR)/dist/crsqlite.mjs  $(WEB_VENDOR)/crsqlite.mjs
 	@echo "==> Done. Outputs:"
 	@ls -lh $(WEB_VENDOR)/crsqlite.wasm $(WEB_VENDOR)/crsqlite.mjs
+
+# Extract the vendored amalgamation into wa-sqlite's expected deps dir.
+# wa-sqlite's own recipe is gated on these files existing; pre-populating
+# them is exactly the no-curl path.
+$(WA_SQLITE_DEPS)/sqlite3.c: $(SQLITE_ZIP) | $(WA_SQLITE_DIR)/crsql
+	@echo "==> Extracting vendored sqlite amalgamation into $(WA_SQLITE_DEPS)"
+	@mkdir -p $(WA_SQLITE_DEPS)
+	@unzip -o -q $(SQLITE_ZIP) -d $(WA_SQLITE_DIR)/.sqlite-amalg-tmp
+	@cp $(WA_SQLITE_DIR)/.sqlite-amalg-tmp/$(SQLITE_INNER)/sqlite3.c    $(WA_SQLITE_DEPS)/sqlite3.c
+	@cp $(WA_SQLITE_DIR)/.sqlite-amalg-tmp/$(SQLITE_INNER)/sqlite3.h    $(WA_SQLITE_DEPS)/sqlite3.h
+	@cp $(WA_SQLITE_DIR)/.sqlite-amalg-tmp/$(SQLITE_INNER)/sqlite3ext.h $(WA_SQLITE_DEPS)/sqlite3ext.h
+	@rm -rf $(WA_SQLITE_DIR)/.sqlite-amalg-tmp
 
 wasm-deps: $(WA_SQLITE_DIR)/crsql
 	@command -v emcc >/dev/null 2>&1 || { \
