@@ -258,12 +258,18 @@ fn install_render_triggers(
         pk = pk_col_esc_clone,
     );
 
-    // The WHEN clause: trigger fires when body is NULL, empty, or
-    // doesn't start with '[' — i.e. anything that isn't already a
-    // JSON array. Our render output always starts with '['.
+    // WHEN clause: trigger fires when body isn't a well-formed JSON
+    // array. Our render output is always `[...]` — starts with '[' AND
+    // ends with ']'. We require BOTH conditions because text-CRDT-fugue's
+    // O(1) append fast-path does `UPDATE body = body || ?` directly, so
+    // after a tail-append the body still starts with `[` (the old JSON
+    // prefix) but is no longer terminated by `]` — without the trailing
+    // check, the trigger would mistake the corrupted JSON-with-suffix
+    // for valid JSON and skip the re-render.
     let needs_upgrade = format!(
         "(NEW.\"{col}\" IS NULL OR length(NEW.\"{col}\") = 0 \
-          OR substr(NEW.\"{col}\", 1, 1) != '[')",
+          OR substr(NEW.\"{col}\", 1, 1) != '[' \
+          OR substr(NEW.\"{col}\", length(NEW.\"{col}\"), 1) != ']')",
         col = col_esc
     );
 
