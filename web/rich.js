@@ -230,14 +230,21 @@ class Peer {
     if (scrubbing) return; // scrubber holds the editor read-only
     const md = this.editor.value;
     if (md === this.lastMarkdown) return;
-    const prevMd = this.lastMarkdown;
+    const prevEngine = this.engineMarkdown;
     this.lastMarkdown = md;
     const mdast = fromMarkdown(md);
     const tree = mdastToTree(mdast);
     await this.db.exec("SELECT crsql_doc_apply(?)", [JSON.stringify(tree)]);
+    // After apply, re-read the engine so engineMarkdown reflects truth.
+    // Without this, captureEvent (below) snapshots a STALE engineMarkdown
+    // from the last sync, and the history lies about what each peer's
+    // engine held during local typing.
+    const post = (await this.db.execA("SELECT crsql_doc_render()"))[0]?.[0] ?? "[]";
+    const postTree = JSON.parse(post);
+    this.engineMarkdown = toMarkdown(treeToMdast(postTree));
     this._renderPreview(mdast);
-    this._dumpState(tree);
-    captureEvent(this, "input", describeDiff(prevMd, md));
+    this._dumpState(postTree);
+    captureEvent(this, "input", describeDiff(prevEngine, this.engineMarkdown));
   }
 
   async refreshFromEngine() {
@@ -245,15 +252,31 @@ class Peer {
     const tree = JSON.parse(treeJson);
     const mdast = treeToMdast(tree);
     const md = toMarkdown(mdast);
-    // Always track engine truth; it's used by the history scrubber.
+    // Always track engine truth; used by history scrubber + by the
+    // next _handleInput's diff.
     this.engineMarkdown = md;
-    // While scrubbing the textarea + preview display a PAST snapshot.
-    // Don't clobber them with the engine's current state — that's the
-    // whole point of the scrubber. The engine keeps moving in the
-    // background; the user returns to it by clicking "live".
+    // While scrubbing the textarea displays a PAST snapshot. Don't
+    // clobber it — the engine keeps moving in the background; the user
+    // returns to it via "live".
     if (scrubbing) return;
-    if (md !== this.editor.value && document.activeElement !== this.editor) {
+    if (md !== this.editor.value) {
+      // Mid-typing sync arrival: textarea must reflect the merged state
+      // or the user's next keystroke diffs against stale text and
+      // clobbers remote edits. Preserve cursor by character offset
+      // (clamp to new length). Caret may jump a few chars when remote
+      // edits land — better than losing the other peer's work.
+      const wasFocused = document.activeElement === this.editor;
+      const selStart = wasFocused ? this.editor.selectionStart : null;
+      const selEnd   = wasFocused ? this.editor.selectionEnd   : null;
       this.editor.value = md;
+      this.lastMarkdown = md;
+      if (wasFocused && selStart != null) {
+        const ns = Math.min(selStart, md.length);
+        const ne = Math.min(selEnd ?? ns, md.length);
+        try { this.editor.setSelectionRange(ns, ne); } catch (_) {}
+        this.editor.focus();
+      }
+    } else {
       this.lastMarkdown = md;
     }
     this._renderPreview(mdast);
