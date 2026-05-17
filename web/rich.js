@@ -193,6 +193,11 @@ class Peer {
     this.editor = null;
     this.preview = null;
     this.lastMarkdown = "";
+    // Canonical engine-rendered markdown, kept fresh by refreshFromEngine.
+    // Distinct from `lastMarkdown` (which mirrors the textarea) so the
+    // history scrubber can snapshot truth even while the textarea is
+    // showing a past state.
+    this.engineMarkdown = "";
     this._applyChain = Promise.resolve();
   }
 
@@ -235,6 +240,13 @@ class Peer {
     const tree = JSON.parse(treeJson);
     const mdast = treeToMdast(tree);
     const md = toMarkdown(mdast);
+    // Always track engine truth; it's used by the history scrubber.
+    this.engineMarkdown = md;
+    // While scrubbing the textarea + preview display a PAST snapshot.
+    // Don't clobber them with the engine's current state — that's the
+    // whole point of the scrubber. The engine keeps moving in the
+    // background; the user returns to it by clicking "live".
+    if (scrubbing) return;
     if (md !== this.editor.value && document.activeElement !== this.editor) {
       this.editor.value = md;
       this.lastMarkdown = md;
@@ -306,9 +318,16 @@ function hexToBytes(hex) {
 // ── history capture + scrubber ───────────────────────────────────────
 
 function captureEvent(peer, source, desc) {
-  if (scrubbing) return; // don't capture events while replaying past state
+  // Snapshot ENGINE state (per-peer canonical render), not textarea
+  // values — otherwise during scrubbing the "live" peer would record a
+  // mix of (scrubbed-past textarea) + (current-engine textarea) per peer.
+  // Engine state is single-sourced and monotonic per peer.
+  //
+  // We DO capture during scrubbing — background sync keeps producing
+  // events; the history table should keep growing so clicking 'live'
+  // lands you at the latest event.
   const snapshots = {};
-  for (const p of world.peers) snapshots[p.label] = p.editor?.value ?? "";
+  for (const p of world.peers) snapshots[p.label] = p.engineMarkdown ?? "";
   const ev = {
     idx: HISTORY.length,
     ts: Date.now(),
@@ -384,6 +403,13 @@ function setScrubbing(on) {
   for (const p of world.peers) {
     if (p.editor) p.editor.readOnly = on;
   }
+  // Blur whatever's focused on entry/exit. Without this, a focused
+  // textarea keeps document.activeElement set, and our "don't clobber
+  // while typing" guard in refreshFromEngine refuses to repaint it
+  // when goLive runs.
+  if (typeof document !== "undefined" && document.activeElement?.blur) {
+    document.activeElement.blur();
+  }
 }
 
 function highlightRow(idx) {
@@ -400,13 +426,19 @@ function highlightRow(idx) {
 }
 
 function jumpTo(idx) {
-  stopAutoPlay();
   if (idx < 0 || idx >= HISTORY.length) return;
   setScrubbing(true);
   const ev = HISTORY[idx];
   for (const p of world.peers) {
-    const md = ev.snapshots[p.label];
-    if (md != null && p.editor) p.editor.value = md;
+    const md = ev.snapshots[p.label] ?? "";
+    if (p.editor) p.editor.value = md;
+    // Render preview from the snapshot too, so it reflects the
+    // scrubbed state (otherwise the textarea jumps but preview stays
+    // pinned to live, which looks like a bug).
+    if (p.preview) {
+      try { p.preview.innerHTML = toHtml(toHast(fromMarkdown(md))); }
+      catch (_) { /* malformed snapshot — ignore */ }
+    }
   }
   playback.current = idx;
   highlightRow(idx);
@@ -423,12 +455,19 @@ function stepNext() {
 }
 
 function startAutoPlay() {
-  if (playback.timer || HISTORY.length === 0) return;
+  if (playback.timer) return;
+  if (HISTORY.length === 0) {
+    console.log("[history] nothing to play yet — type in an editor first");
+    return;
+  }
   const speed = Number(document.querySelector('input[name="speed"]:checked')?.value ?? 500);
   playback.speed = speed;
   document.getElementById("hist-play").classList.add("active");
-  // If we're live, start from beginning. Otherwise step from current.
-  if (playback.current == null) jumpTo(0);
+  document.getElementById("hist-play").textContent = "⏸";
+  // If at the end (or live), restart from 0.
+  if (playback.current == null || playback.current >= HISTORY.length - 1) {
+    jumpTo(0);
+  }
   playback.timer = setInterval(() => {
     const cur = playback.current ?? -1;
     if (cur + 1 >= HISTORY.length) { stopAutoPlay(); return; }
@@ -438,7 +477,8 @@ function startAutoPlay() {
 function stopAutoPlay() {
   if (playback.timer) clearInterval(playback.timer);
   playback.timer = null;
-  document.getElementById("hist-play")?.classList.remove("active");
+  const btn = document.getElementById("hist-play");
+  if (btn) { btn.classList.remove("active"); btn.textContent = "▶"; }
 }
 
 async function goLive() {
@@ -446,8 +486,59 @@ async function goLive() {
   setScrubbing(false);
   playback.current = null;
   highlightRow(null);
-  // resync textareas with engine canonical state
-  for (const p of world.peers) await p.refreshFromEngine();
+  // Force-paint textarea + preview from current engine state. Bypass the
+  // refreshFromEngine focus-check (the "live" button is an explicit user
+  // intent — don't preserve a stale focus state).
+  for (const p of world.peers) {
+    const md = p.engineMarkdown ?? "";
+    if (p.editor) { p.editor.value = md; p.lastMarkdown = md; }
+    if (p.preview) {
+      try { p.preview.innerHTML = toHtml(toHast(fromMarkdown(md))); }
+      catch (_) {}
+    }
+  }
+}
+
+function clearHistory() {
+  stopAutoPlay();
+  HISTORY.length = 0;
+  playback.current = null;
+  if (historyTbody) historyTbody.innerHTML = "";
+  // Stay in current mode (live or scrubbing); user expects this to
+  // just clear the table without disrupting their editor state.
+}
+
+async function copyHistory() {
+  // Strip snapshots from each event for readability; include a separate
+  // `snapshots` block at the top. Format is hand-rolled to be easy to
+  // skim in a chat copy-paste rather than minified JSON.
+  const meta = {
+    peers: world.peers.map((p) => ({ label: p.label, site: p.siteId, hue: p.hue })),
+    eventCount: HISTORY.length,
+    capturedAt: new Date().toISOString(),
+  };
+  const events = HISTORY.map((e) => ({
+    idx: e.idx,
+    t: new Date(e.ts).toISOString().slice(11, 23),
+    peer: e.peer,
+    source: e.source,
+    desc: e.desc,
+    snapshots: e.snapshots,
+  }));
+  const blob = JSON.stringify({ meta, events }, null, 2);
+  try {
+    await navigator.clipboard.writeText(blob);
+    const btn = document.getElementById("hist-copy");
+    if (btn) {
+      const old = btn.textContent;
+      btn.textContent = "copied ✓";
+      setTimeout(() => { btn.textContent = old; }, 1200);
+    }
+  } catch (e) {
+    console.warn("clipboard write failed:", e);
+    // Fallback: dump to console
+    console.log("[history copy fallback]\n" + blob);
+  }
 }
 
 function wireHistoryControls() {
@@ -458,6 +549,15 @@ function wireHistoryControls() {
     if (playback.timer) stopAutoPlay(); else startAutoPlay();
   });
   document.getElementById("hist-live").addEventListener("click", goLive);
+  document.getElementById("hist-copy").addEventListener("click", copyHistory);
+  document.getElementById("hist-clear").addEventListener("click", clearHistory);
+  // Live speed change: if currently auto-playing, re-arm the timer at the
+  // new speed without disturbing the current scrub position.
+  for (const r of document.querySelectorAll('input[name="speed"]')) {
+    r.addEventListener("change", () => {
+      if (playback.timer) { stopAutoPlay(); startAutoPlay(); }
+    });
+  }
 }
 
 // ── DOM bootstrap + sync ─────────────────────────────────────────────
