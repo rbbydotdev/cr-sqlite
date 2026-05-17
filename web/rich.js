@@ -34,6 +34,17 @@ const PEER_HUES = [200, 320, 90, 30, 260, 180, 350, 130];
 let sqlite = null;
 const world = { peers: [], nextSlot: 0 };
 
+// ── history scrubber state ────────────────────────────────────────────
+// Every input + sync event is captured here as a snapshot. UI lets the
+// user click any row, step forward/back, or auto-play with a delay.
+const HISTORY = [];          // { idx, ts, peer, hue, source, desc, snapshots: {label: md} }
+const playback = {
+  current: null,             // currently-displayed event idx (null = live)
+  timer: null,
+  speed: 500,
+};
+let scrubbing = false;       // true while showing a past snapshot
+
 // ── mdast ↔ neutral-tree adapters ────────────────────────────────────
 
 function mdastToTree(root) {
@@ -206,14 +217,17 @@ class Peer {
   }
 
   async _handleInput() {
+    if (scrubbing) return; // scrubber holds the editor read-only
     const md = this.editor.value;
     if (md === this.lastMarkdown) return;
+    const prevMd = this.lastMarkdown;
     this.lastMarkdown = md;
     const mdast = fromMarkdown(md);
     const tree = mdastToTree(mdast);
     await this.db.exec("SELECT crsql_doc_apply(?)", [JSON.stringify(tree)]);
     this._renderPreview(mdast);
     this._dumpState(tree);
+    captureEvent(this, "input", describeDiff(prevMd, md));
   }
 
   async refreshFromEngine() {
@@ -264,6 +278,7 @@ class Peer {
   }
   async applyChanges(rows) {
     if (!rows.length) return;
+    const prevMd = this.lastMarkdown;
     for (const r of rows) {
       await this.db.exec(
         `INSERT INTO crsql_changes ("table","pk","cid","val","col_version","db_version",site_id,cl,seq)
@@ -272,6 +287,9 @@ class Peer {
       );
     }
     await this.refreshFromEngine();
+    if (this.lastMarkdown !== prevMd) {
+      captureEvent(this, `sync (${rows.length})`, describeDiff(prevMd, this.lastMarkdown));
+    }
   }
 
   destroy() { this.db.close().catch(() => {}); this.el?.remove(); }
@@ -283,6 +301,163 @@ function hexToBytes(hex) {
   const out = new Uint8Array(clean.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.substr(i * 2, 2), 16);
   return out;
+}
+
+// ── history capture + scrubber ───────────────────────────────────────
+
+function captureEvent(peer, source, desc) {
+  if (scrubbing) return; // don't capture events while replaying past state
+  const snapshots = {};
+  for (const p of world.peers) snapshots[p.label] = p.editor?.value ?? "";
+  const ev = {
+    idx: HISTORY.length,
+    ts: Date.now(),
+    peer: peer?.label ?? "—",
+    hue: peer?.hue ?? null,
+    source,
+    desc,
+    snapshots,
+  };
+  HISTORY.push(ev);
+  renderHistoryRow(ev);
+}
+
+// Compute a short human-readable diff description.
+function describeDiff(oldStr, newStr) {
+  const o = oldStr ?? "", n = newStr ?? "";
+  if (o === n) return "(no change)";
+  // longest common prefix + suffix → single edit range
+  const lo = o.length, ln = n.length;
+  let p = 0;
+  const min = Math.min(lo, ln);
+  while (p < min && o[p] === n[p]) p++;
+  let so = lo - 1, sn = ln - 1;
+  while (so >= p && sn >= p && o[so] === n[sn]) { so--; sn--; }
+  const removed = o.slice(p, so + 1);
+  const inserted = n.slice(p, sn + 1);
+  const fmt = (s) => JSON.stringify(s.length > 24 ? s.slice(0, 24) + "…" : s);
+  if (removed && inserted) return `replace @${p} ${fmt(removed)} → ${fmt(inserted)}`;
+  if (removed) return `del @${p} ${fmt(removed)}`;
+  if (inserted) return `ins @${p} ${fmt(inserted)}`;
+  return "(no change)";
+}
+
+function fmtTime(ts) {
+  const d = new Date(ts);
+  const h = String(d.getHours()).padStart(2, "0");
+  const m = String(d.getMinutes()).padStart(2, "0");
+  const s = String(d.getSeconds()).padStart(2, "0");
+  return `${h}:${m}:${s}`;
+}
+
+let historyTbody = null;
+function renderHistoryRow(ev) {
+  if (!historyTbody) historyTbody = document.querySelector("#history tbody");
+  const tr = document.createElement("tr");
+  tr.dataset.idx = String(ev.idx);
+  const hueStyle = ev.hue != null ? `background:hsl(${ev.hue},45%,32%)` : "";
+  tr.innerHTML = `
+    <td class="c-idx">${ev.idx + 1}</td>
+    <td class="c-when">${fmtTime(ev.ts)}</td>
+    <td class="c-peer"><span class="peer-chip" style="${hueStyle}">${ev.peer}</span></td>
+    <td class="c-source">${ev.source}</td>
+    <td class="c-desc">${escHtml(ev.desc)}</td>
+  `;
+  tr.addEventListener("click", () => jumpTo(ev.idx));
+  historyTbody.appendChild(tr);
+  // Auto-scroll latest into view if we're at the bottom already
+  const frame = document.querySelector("#history .history-frame");
+  if (frame) {
+    const atBottom = frame.scrollHeight - frame.scrollTop - frame.clientHeight < 50;
+    if (atBottom) frame.scrollTop = frame.scrollHeight;
+  }
+}
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;",
+  }[c]));
+}
+
+function setScrubbing(on) {
+  scrubbing = on;
+  document.body.classList.toggle("scrubbing", on);
+  for (const p of world.peers) {
+    if (p.editor) p.editor.readOnly = on;
+  }
+}
+
+function highlightRow(idx) {
+  if (!historyTbody) return;
+  for (const tr of historyTbody.querySelectorAll("tr")) {
+    const i = Number(tr.dataset.idx);
+    tr.classList.toggle("current", i === idx);
+    tr.classList.toggle("played", idx != null && i < idx);
+  }
+  if (idx != null) {
+    const tr = historyTbody.querySelector(`tr[data-idx="${idx}"]`);
+    tr?.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function jumpTo(idx) {
+  stopAutoPlay();
+  if (idx < 0 || idx >= HISTORY.length) return;
+  setScrubbing(true);
+  const ev = HISTORY[idx];
+  for (const p of world.peers) {
+    const md = ev.snapshots[p.label];
+    if (md != null && p.editor) p.editor.value = md;
+  }
+  playback.current = idx;
+  highlightRow(idx);
+}
+
+function stepPrev() {
+  const cur = playback.current ?? HISTORY.length;
+  jumpTo(Math.max(0, cur - 1));
+}
+function stepNext() {
+  const cur = playback.current ?? -1;
+  if (cur + 1 < HISTORY.length) jumpTo(cur + 1);
+  else goLive();
+}
+
+function startAutoPlay() {
+  if (playback.timer || HISTORY.length === 0) return;
+  const speed = Number(document.querySelector('input[name="speed"]:checked')?.value ?? 500);
+  playback.speed = speed;
+  document.getElementById("hist-play").classList.add("active");
+  // If we're live, start from beginning. Otherwise step from current.
+  if (playback.current == null) jumpTo(0);
+  playback.timer = setInterval(() => {
+    const cur = playback.current ?? -1;
+    if (cur + 1 >= HISTORY.length) { stopAutoPlay(); return; }
+    jumpTo(cur + 1);
+  }, speed);
+}
+function stopAutoPlay() {
+  if (playback.timer) clearInterval(playback.timer);
+  playback.timer = null;
+  document.getElementById("hist-play")?.classList.remove("active");
+}
+
+async function goLive() {
+  stopAutoPlay();
+  setScrubbing(false);
+  playback.current = null;
+  highlightRow(null);
+  // resync textareas with engine canonical state
+  for (const p of world.peers) await p.refreshFromEngine();
+}
+
+function wireHistoryControls() {
+  document.getElementById("hist-reset").addEventListener("click", () => jumpTo(0));
+  document.getElementById("hist-prev").addEventListener("click", stepPrev);
+  document.getElementById("hist-next").addEventListener("click", stepNext);
+  document.getElementById("hist-play").addEventListener("click", () => {
+    if (playback.timer) stopAutoPlay(); else startAutoPlay();
+  });
+  document.getElementById("hist-live").addEventListener("click", goLive);
 }
 
 // ── DOM bootstrap + sync ─────────────────────────────────────────────
@@ -340,6 +515,7 @@ setInterval(syncTick, 600);
 
 async function boot() {
   sqlite = await initWasm((file) => `./vendor/${file}`);
+  wireHistoryControls();
   await addPeer();
   await addPeer();
 }

@@ -62,6 +62,95 @@
       }
       .md-preview pre code { background: none; padding: 0; }
       .md-preview a { color: hsl(200, 70%, 70%); }
+
+      /* history scrubber */
+      #history {
+        margin: 14px 16px 24px;
+        background: var(--bg-card);
+        border: 1px solid var(--hair);
+        border-radius: var(--r);
+      }
+      #history > header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--hair);
+        background: var(--bg-soft);
+        font-size: 12px;
+      }
+      #history > header .spacer { flex: 1; }
+      #history fieldset.speed {
+        display: inline-flex;
+        gap: 8px;
+        border: 1px solid var(--hair);
+        border-radius: 4px;
+        padding: 2px 8px;
+        font-size: 11px;
+      }
+      #history fieldset.speed legend {
+        padding: 0 4px;
+        color: var(--ink-mute);
+        font-size: 10px;
+      }
+      #history fieldset.speed label {
+        display: inline-flex;
+        gap: 3px;
+        align-items: center;
+        color: var(--ink-soft);
+        cursor: pointer;
+      }
+      #history fieldset.speed input { accent-color: hsl(200, 70%, 60%); }
+      #history button.btn {
+        padding: 3px 10px;
+        background: var(--bg-input);
+        border: 1px solid var(--hair);
+        border-radius: 4px;
+        color: var(--ink);
+        font-size: 11px;
+      }
+      #history button.btn:hover { border-color: var(--ink-soft); }
+      #history button.btn.active { background: hsl(200, 50%, 25%); border-color: hsl(200, 70%, 60%); }
+      #history .history-frame {
+        max-height: 260px;
+        overflow: auto;
+      }
+      #history table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      #history th, #history td {
+        text-align: left;
+        padding: 4px 8px;
+        border-bottom: 1px solid var(--hair);
+      }
+      #history th {
+        position: sticky;
+        top: 0;
+        background: var(--bg-soft);
+        color: var(--ink-soft);
+        font-weight: 500;
+      }
+      #history td.c-idx     { width: 50px; color: var(--ink-mute); font-variant-numeric: tabular-nums; }
+      #history td.c-when    { width: 70px; color: var(--ink-mute); font-variant-numeric: tabular-nums; }
+      #history td.c-peer    { width: 60px; }
+      #history td.c-source  { width: 80px; color: var(--ink-soft); }
+      #history td.c-desc    { color: var(--ink); word-break: break-word; }
+      #history tbody tr { cursor: pointer; }
+      #history tbody tr:hover { background: rgba(255,255,255,0.03); }
+      #history tbody tr.current { background: hsl(200, 40%, 20%); }
+      #history tbody tr.played  { color: var(--ink-mute); }
+      #history .peer-chip {
+        display: inline-block;
+        padding: 1px 6px;
+        border-radius: 3px;
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--ink);
+      }
+      .scrubbing #peers .md-editor { background: rgba(0,0,0,0.4); pointer-events: none; }
+      .scrubbing #peers .md-editor::after { content: "scrubbing — click 'live' to resume"; }
     </style>
   </head>
   <body>
@@ -77,6 +166,40 @@
     </header>
 
     <main id="peers" class="peers" aria-label="editors"></main>
+
+    <section id="history" aria-label="change history">
+      <header>
+        <strong>history</strong>
+        <span class="hint">every change · click any row to scrub · ▶ to play</span>
+        <span class="spacer"></span>
+        <fieldset class="speed">
+          <legend>delay</legend>
+          <label><input type="radio" name="speed" value="250">  250ms</label>
+          <label><input type="radio" name="speed" value="500" checked>500ms</label>
+          <label><input type="radio" name="speed" value="1000"> 1s</label>
+          <label><input type="radio" name="speed" value="2000"> 2s</label>
+        </fieldset>
+        <button class="btn" id="hist-reset" title="jump to start">⏮</button>
+        <button class="btn" id="hist-prev"  title="step back">◀</button>
+        <button class="btn" id="hist-play"  title="play">▶</button>
+        <button class="btn" id="hist-next"  title="step forward">▶|</button>
+        <button class="btn" id="hist-live"  title="back to live">live</button>
+      </header>
+      <div class="history-frame">
+        <table id="history-table">
+          <thead>
+            <tr>
+              <th class="c-idx">#</th>
+              <th class="c-when">t</th>
+              <th class="c-peer">peer</th>
+              <th class="c-source">source</th>
+              <th class="c-desc">change</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
 
     <template id="peer-template">
       <article class="peer" data-peer="?">
