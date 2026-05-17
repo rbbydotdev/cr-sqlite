@@ -1,0 +1,29 @@
+core/rs/text-crdt-fugue/src/registration.rs
+  s_18cf6ee2b24796::t_fc072c29e7c54d 135
+  s_18cf6ee2b24796::t_0198490a8ebec7 239-266
+  s_18cf6ee2b24796::t_6f542f5605de4a 267-286
+core/rs/peritext-marks/src/registration.rs
+  s_18cf6ee2b24796::t_2f563e74602e84 138-159
+  s_18cf6ee2b24796::t_0905dc08e4b7f1 283-293,295-299
+tests/smoke/peritext-fastpath-edge.mjs
+  s_18cf6ee2b24796::t_2746b06b4a985c 1-96
+core/rs/text-crdt-fugue/src/insertion.rs
+  s_18cf6ee2b24796::t_320b590f0c9729 66-72,75
+  s_18cf6ee2b24796::t_237dd2c7a4a200 126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "6f894fcea7e150b3208fd818729e3f23f532cdb4",
+  "prompts": {},
+  "sessions": {
+    "s_18cf6ee2b24796": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4e994a1d-8cd6-4fb7-928c-47b6a6c674c5",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
