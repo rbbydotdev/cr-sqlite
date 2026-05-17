@@ -92,6 +92,7 @@ name = "crsql_bundle"
 version = "0.1.0"
 dependencies = [
  "crsql_core",
+ "crsql_doc_wrapper",
  "crsql_fractindex_core",
  "crsql_peritext_marks",
  "crsql_text_crdt_fugue",
@@ -115,6 +116,14 @@ dependencies = [
  "libc-print",
  "num-derive",
  "num-traits",
+ "sqlite_nostd",
+]
+
+[[package]]
+name = "crsql_doc_wrapper"
+version = "0.1.0"
+dependencies = [
+ "crsql_text_crdt_fugue",
  "sqlite_nostd",
 ]
 

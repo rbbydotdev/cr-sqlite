@@ -1,0 +1,37 @@
+[package]
+name = "crsql_doc_wrapper"
+version = "0.1.0"
+edition = "2021"
+keywords = ["sqlite", "cr-sqlite", "crdt", "document"]
+license = "Apache 2"
+
+[lib]
+name = "crsql_doc_wrapper"
+crate-type = ["rlib"]
+
+[dependencies]
+sqlite_nostd = { path="../sqlite-rs-embedded/sqlite_nostd" }
+# We orchestrate the existing primitives. Pull in text-crdt-fugue for its
+# pub re-exports (row_pk encoding); the rest goes through SQL UDF calls
+# so we don't need direct Rust deps on peritext-marks or tree-crdt.
+crsql_text_crdt_fugue = { path="../text-crdt-fugue" }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[features]
+loadable_extension = [
+    "sqlite_nostd/loadable_extension",
+    "crsql_text_crdt_fugue/loadable_extension",
+]
+static = [
+    "sqlite_nostd/static",
+    "crsql_text_crdt_fugue/static",
+]
+omit_load_extension = [
+    "sqlite_nostd/omit_load_extension",
+    "crsql_text_crdt_fugue/omit_load_extension",
+]

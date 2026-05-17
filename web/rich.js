@@ -1,468 +1,269 @@
-// peritext · collaborative rich-text demo
+// doc-wrapper · collaborative markdown demo
 //
-// Each peer is an in-memory cr-sqlite database with the four-layer
-// composition: blocks table + Peritext column + tree CRDT + (caller-chosen)
-// fractional indices. UI surface mirrors the plain-text demo (peer cards,
-// online toggle, sync loop) but content is structured: an ordered list of
-// blocks, each with a kind (paragraph / heading / bullet / quote / code)
-// and a Peritext-managed body. Inline marks (bold/italic/link) apply via a
-// toolbar against the current selection.
+// Architecture: dumb shell. Frontend knows MARKDOWN (via marked.js) and
+// nothing else. Engine handles CRDT — it speaks neutral block-tree JSON.
 //
-// Sync: identical to the plain demo — pull/apply via crsql_changes every
-// 600ms between online peers.
+//   textarea (raw markdown)
+//        ↓ marked.lex
+//   tokens (marked.js shape)
+//        ↓ tokensToTree
+//   neutral tree JSON  [{kind, spans:[{text, marks}]}, ...]
+//        ↓ crsql_doc_apply
+//   engine (tree-CRDT + Peritext + Fugue) handles ops + sync
+//        ↓ crsql_doc_render
+//   neutral tree JSON
+//        ↓ treeToMarkdown
+//   markdown text → textarea (when not focused)
+//
+// Frontend never says "Peritext", "block", "mark", "tree". Only knows
+// markdown ↔ neutral-tree.
 
+import { lexer as marked_lexer } from "./vendor/marked.esm.js";
 import { initWasm } from "./vendor/loader.js";
 
 const PEER_HUES = [200, 320, 90, 30, 260, 180, 350, 130];
-const ROOT = new Uint8Array([0x01]);
-const TRASH = new Uint8Array([0xff]);
-const KINDS = ["paragraph", "heading-1", "heading-2", "bullet", "quote", "code"];
-
 let sqlite = null;
 const world = { peers: [], nextSlot: 0 };
 
-// ── utility: blob/hex/diff ───────────────────────────────────────────────
-function hexToBytes(hex) {
-  if (!hex) return null;
-  const clean = hex.replace(/^0x/i, "");
-  const out = new Uint8Array(clean.length / 2);
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.substr(i * 2, 2), 16);
-  return out;
-}
-function shortSite(hex) { return hex && typeof hex === "string" ? hex.slice(0, 6) : "—"; }
+// ── markdown ↔ neutral-tree adapter ──────────────────────────────────
 
-// id := 8 random bytes prefixed with `site_hex` first 4 bytes for ownership hint
-function makeBlockId(siteHex) {
-  const out = new Uint8Array(16);
-  const sb = hexToBytes(siteHex);
-  if (sb) out.set(sb.slice(0, 4));
-  crypto.getRandomValues(out.subarray(4));
-  return out;
-}
-
-function diff(oldStr, newStr) {
-  const lo = oldStr.length, ln = newStr.length;
-  let p = 0;
-  const min = Math.min(lo, ln);
-  while (p < min && oldStr[p] === newStr[p]) p++;
-  let so = lo - 1, sn = ln - 1;
-  while (so >= p && sn >= p && oldStr[so] === newStr[sn]) { so--; sn--; }
-  return { pos: p, removed: oldStr.slice(p, so + 1), inserted: newStr.slice(p, sn + 1) };
-}
-
-// ── Peritext JSON helpers ────────────────────────────────────────────────
-function parseBody(json) {
-  if (!json) return [{ text: "", marks: {} }];
-  try {
-    const arr = JSON.parse(json);
-    return Array.isArray(arr) ? arr : [{ text: "", marks: {} }];
-  } catch (_) {
-    return [{ text: "", marks: {} }];
+function tokensToTree(tokens) {
+  // Walk top-level marked tokens; flatten into block list with kind/spans.
+  const blocks = [];
+  for (const t of tokens) {
+    if (t.type === "space") continue;
+    blocks.push(...tokenToBlocks(t));
   }
+  return blocks;
 }
-function plainText(spans) {
-  return spans.map((s) => s.text || "").join("");
-}
-function renderSpansToHTML(spans) {
-  if (!spans.length || (spans.length === 1 && !spans[0].text)) {
-    return '<span class="empty">(empty)</span>';
-  }
-  return spans.map((s) => {
-    const t = escapeHtml(s.text || "");
-    if (!s.marks || Object.keys(s.marks).length === 0) return t;
-    let out = t;
-    if (s.marks.bold) out = `<b>${out}</b>`;
-    if (s.marks.italic) out = `<i>${out}</i>`;
-    if (s.marks.link) {
-      const url = typeof s.marks.link === "string" ? s.marks.link : "#";
-      out = `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${out}</a>`;
+
+function tokenToBlocks(t) {
+  switch (t.type) {
+    case "heading": {
+      const kind =
+        t.depth === 1 ? "heading-1" :
+        t.depth === 2 ? "heading-2" :
+        "heading-3";
+      return [{ kind, spans: inlineSpans(t.tokens ?? [{ type: "text", text: t.text }]) }];
     }
-    return out;
-  }).join("");
-}
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
+    case "paragraph":
+      return [{ kind: "paragraph", spans: inlineSpans(t.tokens ?? [{ type: "text", text: t.text }]) }];
+    case "blockquote":
+      // Flatten blockquote children — model each contained line/paragraph
+      // as a separate `quote` block. Nested structure is out of scope.
+      return (t.tokens ?? []).flatMap((c) =>
+        tokenToBlocks(c).map((b) => ({ ...b, kind: "quote" })),
+      );
+    case "list":
+      return (t.items ?? []).flatMap((it) => itemToBlocks(it, t.ordered));
+    case "code":
+      return [{ kind: "code", spans: [{ text: t.text ?? "", marks: [] }] }];
+    case "hr":
+      return [{ kind: "hr", spans: [] }];
+    case "html":
+    case "text":
+      return [{ kind: "paragraph", spans: inlineSpans(t.tokens ?? [{ type: "text", text: t.text }]) }];
+    default:
+      return [{ kind: "paragraph", spans: [{ text: t.raw ?? "", marks: [] }] }];
+  }
 }
 
-// ── tree-CRDT helpers ────────────────────────────────────────────────────
-// Fractional-index strings, lex-comparable. Caller picks per-op; for the
-// demo we just generate "between" two existing slots cheaply.
-function fracBetween(left, right) {
-  // Both "a"-style ASCII; we just pick midpoint by appending. Crude but
-  // correct enough for a demo (no fractional precision concerns).
-  if (!left && !right) return "m";
-  if (!left) return shiftDown(right);
-  if (!right) return shiftUp(left);
-  // pad shorter to longer, find first differing char midpoint
-  const max = Math.max(left.length, right.length);
-  const l = left.padEnd(max, " ");
-  const r = right.padEnd(max, " ");
-  for (let i = 0; i < max; i++) {
-    if (l.charCodeAt(i) !== r.charCodeAt(i)) {
-      const mid = Math.floor((l.charCodeAt(i) + r.charCodeAt(i)) / 2);
-      if (mid > l.charCodeAt(i)) {
-        return l.slice(0, i) + String.fromCharCode(mid);
+function itemToBlocks(item, ordered) {
+  const kind = ordered ? "list-item-ord" : "list-item";
+  // marked nests further blocks inside list items. Flatten: emit one
+  // list-item block for the item text, then any nested blocks as siblings.
+  const tokens = item.tokens ?? [];
+  const out = [];
+  let leading = [];
+  for (const ct of tokens) {
+    if (ct.type === "text" || ct.type === "paragraph") {
+      leading.push(...inlineSpans(ct.tokens ?? [{ type: "text", text: ct.text }]));
+    } else {
+      if (leading.length) {
+        out.push({ kind, spans: leading });
+        leading = [];
       }
-      // need to append after l[i]
-      return l.slice(0, i + 1) + "m";
+      out.push(...tokenToBlocks(ct));
     }
   }
-  return left + "m";
-}
-function shiftUp(s) {
-  // "next after s"
-  const last = s.charCodeAt(s.length - 1);
-  if (last < 122) return s.slice(0, -1) + String.fromCharCode(last + 1);
-  return s + "m";
-}
-function shiftDown(s) {
-  const first = s.charCodeAt(0);
-  if (first > 98) return String.fromCharCode(first - 1) + s.slice(1);
-  return "a" + s;
+  if (leading.length || out.length === 0) {
+    out.push({ kind, spans: leading });
+  }
+  return out;
 }
 
-// ── Peer ─────────────────────────────────────────────────────────────────
+// Inline tokens → spans with marks. marked's inline types: text, strong,
+// em, codespan, link, image, br. We support text/strong/em/codespan/link.
+function inlineSpans(tokens) {
+  const spans = [];
+  walkInline(tokens, [], spans);
+  return mergeAdjacent(spans);
+}
+
+function walkInline(tokens, marks, out) {
+  for (const t of tokens) {
+    switch (t.type) {
+      case "text":
+        out.push({ text: t.text ?? "", marks: marks.slice() });
+        break;
+      case "strong":
+        walkInline(t.tokens ?? [{ type: "text", text: t.text }], [...marks, { name: "bold" }], out);
+        break;
+      case "em":
+        walkInline(t.tokens ?? [{ type: "text", text: t.text }], [...marks, { name: "italic" }], out);
+        break;
+      case "codespan":
+        out.push({ text: t.text ?? "", marks: [...marks, { name: "code" }] });
+        break;
+      case "link":
+        walkInline(
+          t.tokens ?? [{ type: "text", text: t.text }],
+          [...marks, { name: "link", value: t.href ?? "" }],
+          out,
+        );
+        break;
+      case "br":
+        out.push({ text: "\n", marks: marks.slice() });
+        break;
+      default:
+        if (t.raw) out.push({ text: t.raw, marks: marks.slice() });
+    }
+  }
+}
+
+function mergeAdjacent(spans) {
+  const out = [];
+  for (const s of spans) {
+    if (!s.text) continue;
+    const last = out[out.length - 1];
+    if (last && marksEqual(last.marks, s.marks)) {
+      last.text += s.text;
+    } else {
+      out.push({ ...s });
+    }
+  }
+  return out;
+}
+function marksEqual(a, b) {
+  if (a.length !== b.length) return false;
+  const norm = (m) => `${m.name}|${m.value ?? ""}`;
+  const as = a.map(norm).sort();
+  const bs = b.map(norm).sort();
+  return as.every((v, i) => v === bs[i]);
+}
+
+// Neutral tree → markdown source.
+function treeToMarkdown(blocks) {
+  const lines = [];
+  for (const b of blocks) {
+    const text = spansToMarkdown(b.spans ?? []);
+    switch (b.kind) {
+      case "heading-1": lines.push(`# ${text}`); break;
+      case "heading-2": lines.push(`## ${text}`); break;
+      case "heading-3": lines.push(`### ${text}`); break;
+      case "list-item": lines.push(`- ${text}`); break;
+      case "list-item-ord": lines.push(`1. ${text}`); break;
+      case "quote": lines.push(`> ${text}`); break;
+      case "code": lines.push("```\n" + text + "\n```"); break;
+      case "hr": lines.push("---"); break;
+      default: lines.push(text);
+    }
+  }
+  return lines.join("\n\n");
+}
+
+// Convert engine's spans (marks-as-object) → markdown text with **/`/etc.
+function spansToMarkdown(spans) {
+  let out = "";
+  for (const s of spans) {
+    let txt = s.text ?? "";
+    const marks = s.marks || {};
+    // wrap order: code outermost (no recursion), then link, then strong, then em
+    if (marks.code) txt = "`" + txt + "`";
+    else {
+      if (marks.italic) txt = `*${txt}*`;
+      if (marks.bold) txt = `**${txt}**`;
+      if (marks.link) txt = `[${txt}](${typeof marks.link === "string" ? marks.link : ""})`;
+    }
+    out += txt;
+  }
+  return out;
+}
+
+// ── Peer ─────────────────────────────────────────────────────────────
+
 class Peer {
   constructor({ db, label, hue, slot }) {
     Object.assign(this, { db, label, hue, slot });
-    this.siteId = "";
     this.online = true;
-    this.lamportTs = 0;
-    this.pendingOps = 0;
-    this.opCount = 0;
+    this.siteId = "";
     this.el = null;
-    this.docEl = null;
-    this._applyingRemote = false;
-    this._blockInputChains = new Map(); // blockId → Promise chain
-    this._activeBlockId = null;
-    this._activeRange = null; // { start, end }
-    this._localBlocks = new Map(); // blockId → { kind, plainText, bodyJson, depth, parent, frac }
+    this.editor = null;
+    this.preview = null;
+    this.lastMarkdown = "";
+    this._applyChain = Promise.resolve();
   }
 
   static async create(slot) {
     const hue = PEER_HUES[slot % PEER_HUES.length];
     const label = String.fromCharCode(65 + slot);
     const db = await sqlite.open(":memory:");
-    await db.exec(`CREATE TABLE blocks (id BLOB PRIMARY KEY NOT NULL, kind TEXT NOT NULL DEFAULT '', attrs TEXT, body TEXT)`);
-    await db.exec(`SELECT crsql_as_crr('blocks')`);
-    await db.exec(`SELECT crsql_as_peritext('blocks', 'body')`);
-    await db.exec(`SELECT crsql_create_tree('doc')`);
-    // sentinels (root + trash) — shared id convention across peers so concurrent
-    // INSERTs of the same id resolve cleanly via cr-sqlite per-cell LWW.
-    await db.exec(`INSERT INTO blocks (id, kind) VALUES (?, 'document')`, [ROOT]);
-    await db.exec(`INSERT INTO blocks (id, kind) VALUES (?, 'trash')`, [TRASH]);
-
+    await db.exec("SELECT crsql_doc_init()");
     const peer = new Peer({ db, label, hue, slot });
-    peer.siteId = (await db.execA(`SELECT lower(hex(crsql_site_id()))`))[0][0];
+    peer.siteId = (await db.execA("SELECT lower(hex(crsql_site_id()))"))[0][0];
     return peer;
   }
 
-  bumpTs() { return ++this.lamportTs; }
-  async refreshLamport() {
-    // catch up to max ts seen in marks table after sync
-    const r = await this.db.execA(`SELECT COALESCE(MAX(lamport_ts), 0) FROM __crsql_peritext_blocks_body_marks`);
-    this.lamportTs = Math.max(this.lamportTs, Number(r[0]?.[0] ?? 0));
-    const r2 = await this.db.execA(`SELECT COALESCE(MAX(lamport_ts), 0) FROM doc__tree_ops`);
-    this.lamportTs = Math.max(this.lamportTs, Number(r2[0]?.[0] ?? 0));
-  }
-
-  actor() {
-    const bytes = hexToBytes(this.siteId);
-    return bytes ?? new Uint8Array([this.slot]);
-  }
-
-  // ─── block operations ─────────────────────────────────────────────
-  async addBlockAfter(prevId) {
-    const id = makeBlockId(this.siteId);
-    const blocks = await this._readBlocksFlat();
-    let frac;
-    if (!prevId) {
-      // append at end of root children
-      const rootChildren = blocks.filter((b) => bufEq(b.parent, ROOT));
-      const last = rootChildren[rootChildren.length - 1];
-      frac = fracBetween(last?.frac ?? "", "");
-    } else {
-      const i = blocks.findIndex((b) => bufEq(b.id, prevId));
-      const cur = blocks[i];
-      const next = blocks.slice(i + 1).find((b) => bufEq(b.parent, cur.parent));
-      frac = fracBetween(cur?.frac ?? "", next?.frac ?? "");
-    }
-    await this.db.exec(`INSERT INTO blocks (id, kind) VALUES (?, 'paragraph')`, [id]);
-    await this.db.exec(
-      `SELECT crsql_tree_move('doc', ?, ?, ?, ?, ?)`,
-      [id, ROOT, new TextEncoder().encode(frac), this.bumpTs(), this.actor()],
-    );
-    if (!this.online) this.pendingOps += 2;
-    this.opCount += 2;
-    await this._rebuildDOM();
-    this._focusBlock(id, 0);
-  }
-
-  async deleteBlock(id) {
-    if (bufEq(id, ROOT) || bufEq(id, TRASH)) return;
-    await this.db.exec(
-      `SELECT crsql_tree_move('doc', ?, ?, '', ?, ?)`,
-      [id, TRASH, this.bumpTs(), this.actor()],
-    );
-    if (!this.online) this.pendingOps++;
-    this.opCount++;
-    await this._rebuildDOM();
-  }
-
-  async changeKind(id, kind) {
-    await this.db.exec(`UPDATE blocks SET kind = ? WHERE id = ?`, [kind, id]);
-    if (!this.online) this.pendingOps++;
-    this.opCount++;
-    await this._rebuildDOM();
-  }
-
-  // ─── text editing within a block ─────────────────────────────────
-  async _onBlockInput(blockId, newPlainText) {
-    if (this._applyingRemote) return;
-    const local = this._localBlocks.get(bufKey(blockId));
-    const oldPlain = local?.plainText ?? "";
-    if (newPlainText === oldPlain) return;
-    const d = diff(oldPlain, newPlainText);
-    // Optimistic — track locally so subsequent input events diff correctly
-    if (local) local.plainText = newPlainText;
-    try {
-      if (d.removed.length) {
-        await this.db.exec(
-          `SELECT crsql_fugue_delete('blocks', 'body', ?, ?, ?)`,
-          [blockId, d.pos, d.pos + d.removed.length],
-        );
-        this.opCount++;
-        if (!this.online) this.pendingOps++;
-      }
-      if (d.inserted.length) {
-        await this.db.exec(
-          `SELECT crsql_fugue_insert('blocks', 'body', ?, ?, ?)`,
-          [blockId, d.pos, d.inserted],
-        );
-        this.opCount++;
-        if (!this.online) this.pendingOps++;
-      }
-    } catch (e) {
-      console.warn(`peer ${this.label} block edit failed:`, e);
-    }
-    await this._refreshBlockFromDb(blockId);
-    this._renderHeader();
-  }
-
-  // ─── marks ────────────────────────────────────────────────────────
-  async applyMark(name, value) {
-    if (!this._activeBlockId || !this._activeRange) return;
-    const { start, end } = this._activeRange;
-    if (start >= end) return;
-    // for link, end_side = AFTER so it doesn't grow on append
-    const startSide = 0; // before
-    const endSide = name === "link" ? 1 : 0;
-    try {
-      await this.db.exec(
-        `SELECT crsql_peritext_mark('blocks', 'body', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          this._activeBlockId, start, end, name, value,
-          startSide, endSide,
-          this.bumpTs(), this.actor(),
-        ],
-      );
-      this.opCount++;
-      if (!this.online) this.pendingOps++;
-    } catch (e) {
-      console.warn(`peer ${this.label} mark failed:`, e);
-    }
-    await this._refreshBlockFromDb(this._activeBlockId);
-  }
-
-  // ─── DOM rebuild ──────────────────────────────────────────────────
-  async _readBlocksFlat() {
-    const rows = await this.db.execA(`
-      WITH RECURSIVE walk(node, parent, depth, ord_path, frac) AS (
-          SELECT s.node_id, s.parent_id, 0, CAST(s.meta AS BLOB), CAST(s.meta AS TEXT)
-          FROM   doc__tree_state s WHERE s.parent_id = ?
-        UNION ALL
-          SELECT s.node_id, s.parent_id, w.depth + 1,
-                 CAST(w.ord_path || X'00' || s.meta AS BLOB),
-                 CAST(s.meta AS TEXT)
-          FROM   doc__tree_state s, walk w
-          WHERE  s.parent_id = w.node
-      )
-      SELECT w.node, w.parent, w.depth, w.frac, b.kind, b.body
-      FROM   walk w JOIN blocks b ON b.id = w.node
-      WHERE  b.id != ?
-      ORDER  BY w.ord_path
-    `, [ROOT, TRASH]);
-    return rows.map((r) => ({
-      id: r[0], parent: r[1], depth: r[2], frac: r[3],
-      kind: r[4], bodyJson: r[5] ?? "[]",
-    }));
-  }
-
-  async _rebuildDOM() {
-    if (!this.docEl) return;
-    const blocks = await this._readBlocksFlat();
-    const seen = new Set();
-    let prev = null;
-
-    for (const b of blocks) {
-      const key = bufKey(b.id);
-      seen.add(key);
-      const spans = parseBody(b.bodyJson);
-      const plain = plainText(spans);
-      this._localBlocks.set(key, { kind: b.kind, plainText: plain, bodyJson: b.bodyJson, depth: b.depth, parent: b.parent, frac: b.frac });
-
-      let row = this.docEl.querySelector(`.block[data-id="${key}"]`);
-      if (!row) {
-        row = this._makeBlockEl(b.id, key);
-        if (prev?.nextSibling) this.docEl.insertBefore(row, prev.nextSibling);
-        else this.docEl.appendChild(row);
-      }
-      this._updateBlockEl(row, b, spans, plain);
-      prev = row;
-    }
-
-    // remove DOM rows no longer in doc
-    for (const el of [...this.docEl.querySelectorAll(".block")]) {
-      if (!seen.has(el.dataset.id)) el.remove();
-    }
-    this._renderRowsTable(blocks);
-  }
-
-  _makeBlockEl(id, key) {
-    const row = document.createElement("div");
-    row.className = "block";
-    row.dataset.id = key;
-    row.innerHTML = `
-      <select class="block-kind">
-        ${KINDS.map((k) => `<option value="${k}">${k}</option>`).join("")}
-      </select>
-      <div class="block-content" contenteditable="plaintext-only" spellcheck="false"></div>
-      <button class="block-trash" title="delete block">×</button>
-    `;
-    const sel = row.querySelector(".block-kind");
-    sel.addEventListener("change", () => this.changeKind(id, sel.value));
-
-    const content = row.querySelector(".block-content");
-    content.addEventListener("input", () => {
-      this._activeBlockId = id;
-      const chain = (this._blockInputChains.get(key) ?? Promise.resolve())
-        .then(() => this._onBlockInput(id, content.textContent ?? ""))
-        .catch((e) => console.warn(`block input failed:`, e));
-      this._blockInputChains.set(key, chain);
+  bindEditor(textarea, preview) {
+    this.editor = textarea;
+    this.preview = preview;
+    textarea.addEventListener("input", () => {
+      this._applyChain = this._applyChain
+        .then(() => this._handleInput())
+        .catch((e) => console.warn(`peer ${this.label} input failed:`, e));
     });
-    content.addEventListener("focus", () => { this._activeBlockId = id; });
-    content.addEventListener("keyup", () => this._captureSelection(content));
-    content.addEventListener("mouseup", () => this._captureSelection(content));
-    content.addEventListener("keydown", (e) => this._handleHotkey(e, id));
-
-    row.querySelector(".block-trash").addEventListener("click", () => this.deleteBlock(id));
-    return row;
   }
 
-  _updateBlockEl(row, b, spans, plain) {
-    row.dataset.kind = b.kind;
-    const sel = row.querySelector(".block-kind");
-    if (sel.value !== b.kind) sel.value = b.kind;
+  async _handleInput() {
+    const md = this.editor.value;
+    if (md === this.lastMarkdown) return;
+    this.lastMarkdown = md;
+    const tree = tokensToTree(marked_lexer(md));
+    await this.db.exec("SELECT crsql_doc_apply(?)", [JSON.stringify(tree)]);
+    this._renderPreview(tree);
+    this._dumpState(tree);
+  }
 
-    const content = row.querySelector(".block-content");
-    const html = renderSpansToHTML(spans);
-    // Only patch innerHTML if user isn't typing here right now — preserves
-    // caret. We detect "user is typing" by whether this element is focused.
-    if (document.activeElement !== content) {
-      content.innerHTML = html;
-    } else {
-      // Compare textContent — if textContent matches the local plain we just
-      // wrote, mark rendering changed but text didn't. Skip innerHTML update
-      // (preserves caret) and let _refreshBlockFromDb handle the next pass.
-      const currentText = content.textContent ?? "";
-      if (currentText === plain) {
-        // text-equal; re-render marks only if HTML differs significantly.
-        // For simplicity, only re-render if the user has no selection here.
-        const s = window.getSelection();
-        if (!s || s.rangeCount === 0 || !content.contains(s.anchorNode)) {
-          content.innerHTML = html;
-        }
-        // else: leave inner HTML alone; will refresh on next blur/refocus
-      } else {
-        content.innerHTML = html;
-      }
+  // Pull engine state into the textarea (only when user isn't typing).
+  async refreshFromEngine() {
+    const treeJson = (await this.db.execA("SELECT crsql_doc_render()"))[0]?.[0] ?? "[]";
+    const tree = JSON.parse(treeJson);
+    const md = treeToMarkdown(tree);
+    if (md !== this.editor.value && document.activeElement !== this.editor) {
+      this.editor.value = md;
+      this.lastMarkdown = md;
     }
+    this._renderPreview(tree);
+    this._dumpState(tree);
   }
 
-  async _refreshBlockFromDb(blockId) {
-    const r = await this.db.execA(`SELECT kind, body FROM blocks WHERE id = ?`, [blockId]);
-    if (!r.length) {
-      // block deleted/moved-to-trash by remote — full rebuild
-      await this._rebuildDOM();
-      return;
-    }
-    const [kind, bodyJson] = r[0];
-    const spans = parseBody(bodyJson ?? "[]");
-    const plain = plainText(spans);
-    const key = bufKey(blockId);
-    const local = this._localBlocks.get(key) ?? {};
-    local.kind = kind;
-    local.bodyJson = bodyJson ?? "[]";
-    local.plainText = plain;
-    this._localBlocks.set(key, local);
-
-    const row = this.docEl?.querySelector(`.block[data-id="${key}"]`);
-    if (row) this._updateBlockEl(row, { kind, bodyJson, id: blockId }, spans, plain);
+  _renderPreview(tree) {
+    if (!this.preview) return;
+    // Re-render preview via marked from the canonical markdown, so the
+    // preview reflects engine state. Sanitize? For a demo, no.
+    this.preview.innerHTML = renderTreeAsHtml(tree);
   }
 
-  _focusBlock(id, pos) {
-    const key = bufKey(id);
-    const row = this.docEl?.querySelector(`.block[data-id="${key}"]`);
-    if (!row) return;
-    const content = row.querySelector(".block-content");
-    content?.focus();
-    if (content && content.firstChild) {
-      const range = document.createRange();
-      const node = content.firstChild;
-      const offset = Math.min(pos, node.nodeValue?.length ?? 0);
-      try {
-        range.setStart(node, offset);
-        range.setEnd(node, offset);
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-      } catch (_) {}
-    }
+  _dumpState(tree) {
+    const dump = this.el?.querySelector('[data-role="state-dump"]');
+    if (dump) dump.textContent = JSON.stringify(tree, null, 2);
+    const sum = this.el?.querySelector(".rows-summary");
+    if (sum) sum.textContent = `(${tree.length})`;
   }
 
-  _captureSelection(content) {
-    const s = window.getSelection();
-    if (!s || s.rangeCount === 0) return;
-    const r = s.getRangeAt(0);
-    if (!content.contains(r.startContainer) || !content.contains(r.endContainer)) return;
-    const start = textOffsetIn(content, r.startContainer, r.startOffset);
-    const end = textOffsetIn(content, r.endContainer, r.endOffset);
-    this._activeRange = { start: Math.min(start, end), end: Math.max(start, end) };
-  }
-
-  _handleHotkey(e, id) {
-    if (!(e.metaKey || e.ctrlKey)) return;
-    if (e.key === "b") { e.preventDefault(); this._captureSelection(e.target); this.applyMark("bold", null); }
-    else if (e.key === "i") { e.preventDefault(); this._captureSelection(e.target); this.applyMark("italic", null); }
-    else if (e.key === "k") {
-      e.preventDefault();
-      this._captureSelection(e.target);
-      const url = prompt("link URL?", "https://");
-      if (url) this.applyMark("link", url);
-    } else if (e.key === "Enter" && !e.shiftKey) {
-      // Enter at end of block → new paragraph below
-      e.preventDefault();
-      this.addBlockAfter(id);
-    }
-  }
-
-  // ─── headers + tables ─────────────────────────────────────────────
   setOnline(online) {
     if (this.online === online) return;
     this.online = online;
-    if (online) this.pendingOps = 0;
     this._renderHeader();
   }
 
@@ -471,32 +272,10 @@ class Peer {
     this.el.classList.toggle("offline", !this.online);
     const cb = this.el.querySelector(".online-cb");
     if (cb && cb.checked !== this.online) cb.checked = this.online;
-    const label = this.el.querySelector(".online-label");
-    if (label) label.textContent = this.online ? "online" : "offline";
-    const pending = this.el.querySelector(".pending");
-    if (pending) {
-      const show = !this.online && this.pendingOps > 0;
-      pending.hidden = !show;
-      pending.textContent = `${this.pendingOps} pending`;
-    }
+    const lbl = this.el.querySelector(".online-label");
+    if (lbl) lbl.textContent = this.online ? "online" : "offline";
   }
 
-  _renderRowsTable(blocks) {
-    const summary = this.el?.querySelector(".rows-summary");
-    if (summary) summary.textContent = `(${blocks.length})`;
-    const tbody = this.el?.querySelector("tbody");
-    if (!tbody) return;
-    tbody.innerHTML = blocks.map((b) => `
-      <tr>
-        <td class="c-item">${bufKey(b.id).slice(0, 8)}…</td>
-        <td class="c-idx">${b.depth}</td>
-        <td class="c-content">${escapeHtml(b.kind)}</td>
-        <td class="c-parent" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(b.bodyJson ?? "")}</td>
-      </tr>
-    `).join("") || `<tr class="row-empty"><td colspan="4">— no blocks yet —</td></tr>`;
-  }
-
-  // ─── sync ────────────────────────────────────────────────────────
   async pullChanges(excludeSiteHex) {
     return await this.db.execA(
       `SELECT "table","pk","cid","val","col_version","db_version",site_id,cl,seq
@@ -506,53 +285,66 @@ class Peer {
   }
   async applyChanges(rows) {
     if (!rows.length) return;
-    this._applyingRemote = true;
-    try {
-      for (const r of rows) {
-        await this.db.exec(
-          `INSERT INTO crsql_changes ("table","pk","cid","val","col_version","db_version",site_id,cl,seq)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          r,
-        );
-      }
-    } finally { this._applyingRemote = false; }
-    await this.refreshLamport();
-    await this._rebuildDOM();
+    for (const r of rows) {
+      await this.db.exec(
+        `INSERT INTO crsql_changes ("table","pk","cid","val","col_version","db_version",site_id,cl,seq)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        r,
+      );
+    }
+    await this.refreshFromEngine();
   }
 
-  destroy() {
-    this.db.close().catch(() => {});
-    this.el?.remove();
+  destroy() { this.db.close().catch(() => {}); this.el?.remove(); }
+}
+
+function hexToBytes(hex) {
+  if (!hex) return null;
+  const clean = hex.replace(/^0x/i, "");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.substr(i * 2, 2), 16);
+  return out;
+}
+
+// Render the engine's tree as HTML for the preview pane (display only).
+function renderTreeAsHtml(tree) {
+  const parts = [];
+  for (const b of tree) {
+    const inner = b.spans.map(spanToHtml).join("");
+    switch (b.kind) {
+      case "heading-1": parts.push(`<h1>${inner}</h1>`); break;
+      case "heading-2": parts.push(`<h2>${inner}</h2>`); break;
+      case "heading-3": parts.push(`<h3>${inner}</h3>`); break;
+      case "list-item": parts.push(`<ul><li>${inner}</li></ul>`); break;
+      case "list-item-ord": parts.push(`<ol><li>${inner}</li></ol>`); break;
+      case "quote": parts.push(`<blockquote>${inner}</blockquote>`); break;
+      case "code": parts.push(`<pre><code>${escapeHtml(b.spans.map((s) => s.text).join(""))}</code></pre>`); break;
+      case "hr": parts.push("<hr>"); break;
+      default: parts.push(`<p>${inner}</p>`);
+    }
   }
+  return parts.join("");
 }
-
-function bufKey(buf) {
-  const u = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-  return [...u].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-function bufEq(a, b) {
-  const ua = a instanceof Uint8Array ? a : new Uint8Array(a);
-  const ub = b instanceof Uint8Array ? b : new Uint8Array(b);
-  if (ua.length !== ub.length) return false;
-  for (let i = 0; i < ua.length; i++) if (ua[i] !== ub[i]) return false;
-  return true;
-}
-
-function textOffsetIn(root, node, offset) {
-  // Compute char offset of `node`+offset within `root` (treats all text nodes
-  // in document order). Stops short and returns the offset if it finds node.
-  let count = 0;
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
-  let n = walker.nextNode();
-  while (n) {
-    if (n === node) return count + offset;
-    count += (n.nodeValue ?? "").length;
-    n = walker.nextNode();
+function spanToHtml(s) {
+  let out = escapeHtml(s.text);
+  const marks = s.marks || {};
+  if (marks.code) return `<code>${out}</code>`;
+  if (marks.italic) out = `<em>${out}</em>`;
+  if (marks.bold) out = `<strong>${out}</strong>`;
+  if (marks.link) {
+    const url = typeof marks.link === "string" ? marks.link : "#";
+    out = `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${out}</a>`;
   }
-  return count;
+  return out;
+}
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
 }
 
-// ── DOM bootstrap ────────────────────────────────────────────────────────
+// ── DOM bootstrap + sync ─────────────────────────────────────────────
+
 const template = document.getElementById("peer-template");
 const peersHost = document.getElementById("peers");
 
@@ -562,32 +354,17 @@ async function buildPeerEl(peer) {
   article.style.setProperty("--hue", String(peer.hue));
   article.dataset.peer = peer.label;
   article.querySelector(".peer-name").textContent = `editor ${peer.label}`;
-  article.querySelector(".peer-site").textContent = `site:${shortSite(peer.siteId)}`;
+  article.querySelector(".peer-site").textContent = `site:${peer.siteId.slice(0, 6)}`;
   peer.el = article;
-  peer.docEl = article.querySelector('[data-role="doc"]');
-
+  peer.bindEditor(
+    article.querySelector('[data-role="editor"]'),
+    article.querySelector('[data-role="preview"]'),
+  );
   const cb = article.querySelector(".online-cb");
   cb.addEventListener("change", () => peer.setOnline(cb.checked));
   article.querySelector(".btn-close").addEventListener("click", () => removePeer(peer));
-  article.querySelector('[data-role="add-block"]').addEventListener("click", () => peer.addBlockAfter(null));
-
-  for (const btn of article.querySelectorAll(".marks-toolbar button")) {
-    btn.addEventListener("click", async () => {
-      const name = btn.dataset.mark;
-      let value = null;
-      if (name === "link") {
-        value = prompt("link URL?", "https://");
-        if (!value) return;
-      }
-      await peer.applyMark(name, value);
-    });
-  }
-
-  // initial paragraph block so the editor isn't empty
-  await peer.addBlockAfter(null);
   return article;
 }
-
 async function addPeer() {
   const slot = world.nextSlot++;
   const peer = await Peer.create(slot);
@@ -604,7 +381,6 @@ function removePeer(peer) {
   peer.destroy();
 }
 
-// ── sync loop ────────────────────────────────────────────────────────────
 async function syncTick() {
   const online = world.peers.filter((p) => p.online);
   if (online.length < 2) return;
@@ -620,7 +396,6 @@ async function syncTick() {
 }
 setInterval(syncTick, 600);
 
-// ── boot ────────────────────────────────────────────────────────────────
 async function boot() {
   sqlite = await initWasm((file) => `./vendor/${file}`);
   await addPeer();

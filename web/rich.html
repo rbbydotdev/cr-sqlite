@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>peritext · collaborative rich-text demo</title>
+    <title>doc-wrapper · markdown sync demo</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -12,144 +12,66 @@
     />
     <link rel="stylesheet" href="./styles.css" />
     <style>
-      /* rich-text-specific styles, layered on top of styles.css */
-      .doc {
-        display: flex;
-        flex-direction: column;
-        gap: 6px;
-        padding: 10px 12px 12px;
-      }
-      .block {
-        display: grid;
-        grid-template-columns: 110px 1fr auto;
-        gap: 8px;
-        align-items: start;
-        padding: 6px 8px;
-        background: var(--bg-input);
-        border: 1px solid var(--hair);
-        border-radius: var(--r);
-      }
-      .block-kind {
-        background: var(--bg-soft);
-        border: 1px solid var(--hair);
-        padding: 4px 6px;
-        border-radius: 4px;
-        font-size: 11px;
-        color: var(--ink-soft);
-      }
-      .block-content {
+      .md-editor {
         width: 100%;
-        min-height: 28px;
-        padding: 4px 6px;
-        background: transparent;
-        font-family: inherit;
+        min-height: 220px;
+        padding: 10px 12px;
+        background: var(--bg-input);
+        font-family: "JetBrains Mono", monospace;
         font-size: 13px;
+        line-height: 1.55;
         color: var(--ink);
         outline: none;
         white-space: pre-wrap;
-        word-wrap: break-word;
+        resize: vertical;
+        border: 0;
       }
-      .block-content:focus { background: rgba(255,255,255,0.02); }
-      .block[data-kind="heading-1"] .block-content {
-        font-size: 18px;
-        font-weight: 600;
+      .md-preview {
+        padding: 10px 14px;
+        font-family: ui-sans-serif, -apple-system, system-ui, sans-serif;
+        font-size: 13px;
+        color: var(--ink);
+        border-top: 1px solid var(--hair);
+        background: rgba(255,255,255,0.02);
       }
-      .block[data-kind="heading-2"] .block-content {
-        font-size: 15px;
-        font-weight: 600;
-      }
-      .block[data-kind="bullet"] .block-content::before {
-        content: "• ";
-        color: var(--ink-mute);
-      }
-      .block[data-kind="quote"] .block-content {
+      .md-preview h1 { font-size: 18px; margin: 0.4em 0; font-weight: 600; }
+      .md-preview h2 { font-size: 15px; margin: 0.4em 0; font-weight: 600; }
+      .md-preview h3 { font-size: 14px; margin: 0.4em 0; font-weight: 600; }
+      .md-preview p  { margin: 0.4em 0; }
+      .md-preview ul, .md-preview ol { padding-left: 20px; margin: 0.4em 0; }
+      .md-preview li { margin: 0.15em 0; }
+      .md-preview blockquote {
         border-left: 2px solid var(--hair-strong);
         padding-left: 10px;
         color: var(--ink-soft);
-        font-style: italic;
+        margin: 0.4em 0;
       }
-      .block[data-kind="code"] .block-content {
+      .md-preview code {
         background: rgba(0,0,0,0.3);
+        padding: 1px 4px;
+        border-radius: 3px;
         font-family: "JetBrains Mono", monospace;
         font-size: 12px;
-        padding: 6px 8px;
+      }
+      .md-preview pre {
+        background: rgba(0,0,0,0.3);
+        padding: 8px 10px;
         border-radius: 4px;
+        overflow: auto;
+        margin: 0.4em 0;
       }
-      .block-trash {
-        background: transparent;
-        border: 1px solid var(--hair);
-        color: var(--ink-mute);
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-size: 11px;
-      }
-      .block-trash:hover {
-        color: var(--bad);
-        border-color: var(--bad);
-      }
-      .block-new {
-        margin-top: 4px;
-        align-self: flex-start;
-        padding: 4px 10px;
-        background: var(--bg-soft);
-        border: 1px dashed var(--hair-strong);
-        border-radius: 4px;
-        color: var(--ink-soft);
-        font-size: 11px;
-      }
-      .block-new:hover { color: var(--ink); border-color: var(--ink-soft); }
-
-      .marks-toolbar {
-        display: flex;
-        gap: 4px;
-        padding: 6px 12px;
-        border-bottom: 1px solid var(--hair);
-        background: var(--bg-soft);
-      }
-      .marks-toolbar button {
-        padding: 3px 8px;
-        background: transparent;
-        border: 1px solid var(--hair);
-        border-radius: 3px;
-        font-size: 11px;
-        color: var(--ink-soft);
-      }
-      .marks-toolbar button:hover { color: var(--ink); border-color: var(--ink-soft); }
-      .marks-toolbar .mb { font-weight: 700; }
-      .marks-toolbar .mi { font-style: italic; }
-      .marks-toolbar .ml { text-decoration: underline; }
-      .marks-toolbar .hint {
-        margin-left: auto;
-        color: var(--ink-mute);
-        font-size: 10px;
-        align-self: center;
-      }
-
-      /* rendered preview area (right side of each block) */
-      .block-preview {
-        font-size: 12px;
-        color: var(--ink-soft);
-        padding: 4px 8px;
-        background: rgba(0,0,0,0.15);
-        border-radius: 3px;
-        min-width: 200px;
-        max-width: 320px;
-        overflow-wrap: anywhere;
-      }
-      .block-preview b { color: var(--ink); }
-      .block-preview i { color: var(--ink); }
-      .block-preview a { color: hsl(200, 70%, 70%); text-decoration: underline; }
-      .block-preview .empty { color: var(--ink-mute); font-style: italic; }
+      .md-preview pre code { background: none; padding: 0; }
+      .md-preview a { color: hsl(200, 70%, 70%); }
     </style>
   </head>
   <body>
     <header class="bar">
       <h1>
-        peritext
-        <span>tree + inline rich-text · crdt demo</span>
+        doc-wrapper
+        <span>markdown · sync via crdt · tree+peritext · crdt demo</span>
       </h1>
       <div class="actions">
-        <span class="hint">type · select · format · toggle online to gate sync</span>
+        <span class="hint">type markdown · toggle online to gate sync</span>
         <button class="btn" id="add-peer">+ editor</button>
       </div>
     </header>
@@ -171,34 +93,18 @@
           <button class="btn-icon btn-close" title="remove editor" aria-label="remove editor">✕</button>
         </header>
 
-        <div class="marks-toolbar">
-          <button class="mb" data-mark="bold" title="bold (Cmd/Ctrl-B)">B</button>
-          <button class="mi" data-mark="italic" title="italic (Cmd/Ctrl-I)">I</button>
-          <button class="ml" data-mark="link" title="link (Cmd/Ctrl-K)">link</button>
-          <span class="hint">select text in any block first</span>
-        </div>
+        <textarea class="md-editor" data-role="editor"
+                  placeholder="type markdown…" spellcheck="false"></textarea>
 
-        <div class="doc" data-role="doc"></div>
-
-        <button class="block-new" data-role="add-block">+ paragraph</button>
+        <div class="md-preview" data-role="preview"></div>
 
         <details class="peer-rows">
           <summary>
-            <span class="rows-label">blocks state</span>
+            <span class="rows-label">engine state (rendered tree)</span>
             <span class="rows-summary">(0)</span>
           </summary>
           <div class="rows-frame">
-            <table>
-              <thead>
-                <tr>
-                  <th class="c-item">id</th>
-                  <th class="c-idx">depth</th>
-                  <th class="c-content">kind</th>
-                  <th class="c-parent">body (json)</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
+            <pre data-role="state-dump" style="margin:0;padding:8px;font-size:11px;color:var(--ink-soft);overflow:auto;max-height:240px"></pre>
           </div>
         </details>
       </article>
