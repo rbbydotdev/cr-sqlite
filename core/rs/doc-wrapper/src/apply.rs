@@ -448,9 +448,14 @@ fn apply_content_diff(
     Ok(())
 }
 
-// V1 mark strategy: unmark over the full doc length for each mark name
-// currently present, then re-apply all new marks at their ranges. Safe
-// (Peritext LWW picks the latest), wasteful when nothing changed.
+// Set-diff mark strategy: read currently-resolved marks from the
+// peritext render output, compute (new ∖ current) and (current ∖ new),
+// emit only the deltas. Each mark instance has identity
+// (name, start, end, value). This:
+//   * eliminates redundant remark churn (no-op when nothing changed)
+//   * preserves additive-mark instances across re-apply (Peritext §3.2.2)
+//   * matches paper-§3.2.1 sequential-conflict intent: Alice's selective
+//     unmark stays selective; Bob's full-region rebold doesn't clobber it
 fn apply_marks(
     db: *mut sqlite3,
     id_hex: &str,
@@ -458,37 +463,163 @@ fn apply_marks(
     ts: &mut i64,
     actor_hex: &str,
 ) -> Result<(), String> {
-    let plain_len = read_plain_len(db, id_hex)?;
+    let current = read_current_marks_resolved(db, id_hex)?;
 
-    // 1. Unmark every name currently present on this block.
-    let active_names = read_active_mark_names(db, id_hex)?;
-    if plain_len > 0 {
-        for name in &active_names {
+    // emit unmarks for marks present in current but not in new
+    for cm in &current {
+        if !new_marks.iter().any(|nm| flat_eq(nm, cm)) {
             let sql = format!(
-                "SELECT crsql_peritext_unmark('blocks', 'body', X'{}', 0, {}, '{}', 0, 0, {}, X'{}')",
-                id_hex, plain_len, crate::util::esc_lit(name), *ts, actor_hex
+                "SELECT crsql_peritext_unmark('blocks', 'body', X'{}', {}, {}, '{}', 0, 0, {}, X'{}')",
+                id_hex, cm.start, cm.end,
+                crate::util::esc_lit(&cm.name),
+                *ts, actor_hex
             );
-            db.exec_safe(&sql).map_err(|_| format!("unmark {} on {}", name, id_hex))?;
+            db.exec_safe(&sql).map_err(|_| format!("unmark {} on {}", cm.name, id_hex))?;
             *ts += 1;
         }
     }
 
-    // 2. Apply new marks.
-    for m in new_marks {
-        if m.end <= m.start { continue; }
-        let val_clause = match &m.value {
+    // emit marks for new marks not already present in current
+    for nm in new_marks {
+        if nm.end <= nm.start { continue; }
+        if current.iter().any(|cm| flat_eq(nm, cm)) { continue; }
+        let val_clause = match &nm.value {
             None => String::from("NULL"),
             Some(v) => format!("'{}'", crate::util::esc_lit(v)),
         };
-        let end_side = if m.name == "link" || m.name == "code" { 1 } else { 0 };
+        let end_side = if nm.name == "link" || nm.name == "code" { 1 } else { 0 };
         let sql = format!(
             "SELECT crsql_peritext_mark('blocks', 'body', X'{}', {}, {}, '{}', {}, 0, {}, {}, X'{}')",
-            id_hex, m.start, m.end,
-            crate::util::esc_lit(&m.name),
+            id_hex, nm.start, nm.end,
+            crate::util::esc_lit(&nm.name),
             val_clause, end_side, *ts, actor_hex
         );
-        db.exec_safe(&sql).map_err(|_| format!("mark {} on {}", m.name, id_hex))?;
+        db.exec_safe(&sql).map_err(|_| format!("mark {} on {}", nm.name, id_hex))?;
         *ts += 1;
+    }
+    Ok(())
+}
+
+fn flat_eq(a: &FlatMark, b: &FlatMark) -> bool {
+    a.name == b.name && a.start == b.start && a.end == b.end && a.value == b.value
+}
+
+// Read the block's currently-active marks at resolved character positions
+// by walking the peritext_render output. Each unique (name, value) run
+// in the JSON spans becomes one FlatMark covering its char range.
+fn read_current_marks_resolved(
+    db: *mut sqlite3,
+    id_hex: &str,
+) -> Result<Vec<FlatMark>, String> {
+    use alloc::collections::BTreeMap;
+
+    // SQL walks the render output (JSON array of spans), yielding one row
+    // per span with its text length and a marks-JSON blob we then parse.
+    let sql = format!(
+        "SELECT \
+            length(json_extract(s.value, '$.text')) AS textlen, \
+            json_extract(s.value, '$.marks') AS marks_json \
+         FROM json_each((SELECT body FROM blocks WHERE id = X'{}')) AS s \
+         ORDER BY s.key",
+        id_hex
+    );
+    let stmt = db.prepare_v2(&sql)
+        .map_err(|_| String::from("prepare read_current_marks"))?;
+
+    // Walk spans accumulating mark runs. `open[(name,value)] = start_pos`
+    // tracks marks currently open across consecutive spans. When a mark
+    // is absent in a span, close the run and emit a FlatMark.
+    let mut open: BTreeMap<(String, Option<String>), u32> = BTreeMap::new();
+    let mut out: Vec<FlatMark> = Vec::new();
+    let mut pos: u32 = 0;
+
+    loop {
+        match stmt.step().map_err(|_| String::from("step marks walk"))? {
+            ResultCode::ROW => {
+                let textlen = stmt.column_int64(0) as u32;
+                let marks_json = stmt.column_text(1).unwrap_or("");
+                let mut span_marks: BTreeMap<(String, Option<String>), ()> = BTreeMap::new();
+                if !marks_json.is_empty() && marks_json != "null" {
+                    parse_span_marks(db, marks_json, &mut span_marks)?;
+                }
+
+                // Close runs not in this span
+                let to_close: Vec<(String, Option<String>)> = open.keys()
+                    .filter(|k| !span_marks.contains_key(k))
+                    .cloned()
+                    .collect();
+                for key in to_close {
+                    let start = open.remove(&key).unwrap();
+                    out.push(FlatMark { name: key.0, value: key.1, start, end: pos });
+                }
+                // Open new runs
+                for k in span_marks.keys() {
+                    if !open.contains_key(k) { open.insert(k.clone(), pos); }
+                }
+                pos += textlen;
+            }
+            ResultCode::DONE => break,
+            _ => return Err(String::from("read_current_marks: unexpected step")),
+        }
+    }
+    // Close any still-open runs at end of doc
+    for (key, start) in open.into_iter() {
+        out.push(FlatMark { name: key.0, value: key.1, start, end: pos });
+    }
+    Ok(out)
+}
+
+// Parse a single span's marks JSON. Shape: {markName: value | [values...]}
+// where boolean marks are `true`, parameterized are strings/numbers, and
+// additive marks (comments) are arrays of values. Each (name, value)
+// entry becomes a key.
+fn parse_span_marks(
+    db: *mut sqlite3,
+    marks_json: &str,
+    out: &mut alloc::collections::BTreeMap<(String, Option<String>), ()>,
+) -> Result<(), String> {
+    // json_each over an object yields (key, value) pairs. value may be
+    // a primitive (boolean/string/number) for LWW, or an array for additive.
+    let stmt = db.prepare_v2(
+        "SELECT key, type, value FROM json_each(?)",
+    ).map_err(|_| String::from("prepare span marks parse"))?;
+    stmt.bind_text(1, marks_json, sqlite::Destructor::TRANSIENT)
+        .map_err(|_| String::from("bind span marks"))?;
+
+    loop {
+        match stmt.step().map_err(|_| String::from("step span marks parse"))? {
+            ResultCode::ROW => {
+                let name = String::from(stmt.column_text(0).unwrap_or(""));
+                let kind = String::from(stmt.column_text(1).unwrap_or(""));
+                if kind == "array" {
+                    // additive: enumerate the array values, each is a
+                    // distinct mark instance.
+                    let arr_json = stmt.column_text(2).unwrap_or("");
+                    let sub = db.prepare_v2(
+                        "SELECT type, value FROM json_each(?)",
+                    ).map_err(|_| String::from("prepare additive array"))?;
+                    sub.bind_text(1, arr_json, sqlite::Destructor::TRANSIENT)
+                        .map_err(|_| String::from("bind additive array"))?;
+                    loop {
+                        match sub.step().map_err(|_| String::from("step additive"))? {
+                            ResultCode::ROW => {
+                                let v = sub.column_text(1).ok().map(String::from);
+                                out.insert((name.clone(), v), ());
+                            }
+                            _ => break,
+                        }
+                    }
+                } else if kind == "true" || kind == "integer" || kind == "real" {
+                    // boolean mark: stored as value=true → no payload
+                    out.insert((name, None), ());
+                } else if kind == "text" {
+                    let v = stmt.column_text(2).ok().map(String::from);
+                    out.insert((name, v), ());
+                }
+            }
+            ResultCode::DONE => break,
+            _ => return Err(String::from("parse_span_marks: unexpected step")),
+        }
     }
     Ok(())
 }
