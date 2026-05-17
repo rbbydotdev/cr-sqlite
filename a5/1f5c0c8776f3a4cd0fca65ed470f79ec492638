@@ -1,0 +1,20 @@
+web/rich.js
+  s_18cf6ee2b24796::t_fcf1a6c252ddac 222-226
+  s_18cf6ee2b24796::t_7f8426f2fe3e7b 279
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "a51f5c0c8776f3a4cd0fca65ed470f79ec492638",
+  "prompts": {},
+  "sessions": {
+    "s_18cf6ee2b24796": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4e994a1d-8cd6-4fb7-928c-47b6a6c674c5",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
