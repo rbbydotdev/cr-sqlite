@@ -219,6 +219,11 @@ class Peer {
         .then(() => this._handleInput())
         .catch((e) => console.warn(`peer ${this.label} input failed:`, e));
     });
+    // Focus → context-only event in the history log. Doesn't change CRDT
+    // state but helps explain timing: "Peer A focused, then typed..."
+    textarea.addEventListener("focus", () => {
+      if (!scrubbing) captureEvent(this, "focus", "user clicked into editor");
+    });
   }
 
   async _handleInput() {
@@ -271,6 +276,7 @@ class Peer {
     if (this.online === online) return;
     this.online = online;
     this._renderHeader();
+    captureEvent(this, online ? "online" : "offline", online ? "reconnect" : "going offline");
   }
   _renderHeader() {
     if (!this.el) return;
