@@ -1,0 +1,28 @@
+core/rs/doc-wrapper/src/init.rs
+  s_18cf6ee2b24796::t_b280259516859b 43-46
+web/vendor/loader.js
+  ai_agent 27-31,34
+tests/smoke/doc-wrapper-peritext-paper.mjs
+  s_18cf6ee2b24796::t_3c05e5a069e687 19,21,23-25
+  s_18cf6ee2b24796::t_1c406ca1392911 56,82,96,129,141,178,192,238,257,301,316,362,377,413,427,476
+  s_18cf6ee2b24796::t_3d87d2a7fe0f91 13-17,20,22
+  s_18cf6ee2b24796::t_b031b0d38db74f 1-12,18,26-55,57-81,83-95,97-128,130-140,142-177,179-191,193-237,239-256,258-300,302-315,317-361,363-376,378-412,414-426,428-475,477-478
+tests/smoke/_wasm.mjs
+  s_18cf6ee2b24796::t_7a280ed1ee6f79 1-81
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "1002bec73d096f464f39c635a4226b051f55b590",
+  "prompts": {},
+  "sessions": {
+    "s_18cf6ee2b24796": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4e994a1d-8cd6-4fb7-928c-47b6a6c674c5",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
