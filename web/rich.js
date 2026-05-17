@@ -18,7 +18,10 @@
 // Frontend never says "Peritext", "block", "mark", "tree". Only knows
 // markdown ↔ neutral-tree.
 
-import { lexer as marked_lexer } from "./vendor/marked.esm.js";
+// marked owns parsing AND HTML rendering. We use lexer for the structured
+// path into the engine and parse for the display path. Zero custom HTML/
+// markdown logic in this file other than the tree ↔ tokens adapters.
+import { lexer as marked_lexer, parse as marked_parse } from "./vendor/marked.esm.js";
 import { initWasm } from "./vendor/loader.js";
 
 const PEER_HUES = [200, 320, 90, 30, 260, 180, 350, 130];
@@ -230,7 +233,7 @@ class Peer {
     this.lastMarkdown = md;
     const tree = tokensToTree(marked_lexer(md));
     await this.db.exec("SELECT crsql_doc_apply(?)", [JSON.stringify(tree)]);
-    this._renderPreview(tree);
+    this._renderPreview(md);
     this._dumpState(tree);
   }
 
@@ -243,15 +246,12 @@ class Peer {
       this.editor.value = md;
       this.lastMarkdown = md;
     }
-    this._renderPreview(tree);
+    this._renderPreview(md);
     this._dumpState(tree);
   }
 
-  _renderPreview(tree) {
-    if (!this.preview) return;
-    // Re-render preview via marked from the canonical markdown, so the
-    // preview reflects engine state. Sanitize? For a demo, no.
-    this.preview.innerHTML = renderTreeAsHtml(tree);
+  _renderPreview(md) {
+    if (this.preview) this.preview.innerHTML = marked_parse(md);
   }
 
   _dumpState(tree) {
@@ -304,43 +304,6 @@ function hexToBytes(hex) {
   const out = new Uint8Array(clean.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.substr(i * 2, 2), 16);
   return out;
-}
-
-// Render the engine's tree as HTML for the preview pane (display only).
-function renderTreeAsHtml(tree) {
-  const parts = [];
-  for (const b of tree) {
-    const inner = b.spans.map(spanToHtml).join("");
-    switch (b.kind) {
-      case "heading-1": parts.push(`<h1>${inner}</h1>`); break;
-      case "heading-2": parts.push(`<h2>${inner}</h2>`); break;
-      case "heading-3": parts.push(`<h3>${inner}</h3>`); break;
-      case "list-item": parts.push(`<ul><li>${inner}</li></ul>`); break;
-      case "list-item-ord": parts.push(`<ol><li>${inner}</li></ol>`); break;
-      case "quote": parts.push(`<blockquote>${inner}</blockquote>`); break;
-      case "code": parts.push(`<pre><code>${escapeHtml(b.spans.map((s) => s.text).join(""))}</code></pre>`); break;
-      case "hr": parts.push("<hr>"); break;
-      default: parts.push(`<p>${inner}</p>`);
-    }
-  }
-  return parts.join("");
-}
-function spanToHtml(s) {
-  let out = escapeHtml(s.text);
-  const marks = s.marks || {};
-  if (marks.code) return `<code>${out}</code>`;
-  if (marks.italic) out = `<em>${out}</em>`;
-  if (marks.bold) out = `<strong>${out}</strong>`;
-  if (marks.link) {
-    const url = typeof marks.link === "string" ? marks.link : "#";
-    out = `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${out}</a>`;
-  }
-  return out;
-}
-function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
 }
 
 // ── DOM bootstrap + sync ─────────────────────────────────────────────
