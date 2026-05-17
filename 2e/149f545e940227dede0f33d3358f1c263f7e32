@@ -1,0 +1,25 @@
+core/rs/peritext-marks/src/registration.rs
+  s_18cf6ee2b24796::t_0a2e336f9ed629 261-268,271-272
+docs/design/rich-text-blocks.md
+  s_18cf6ee2b24796::t_245fbdb5c0cbf1 1-229
+tests/smoke/rich-text-blocks.mjs
+  s_18cf6ee2b24796::t_3a6bffd8d604c2 37-38,41
+  s_18cf6ee2b24796::t_4b34c621684022 82-85,88,92-93
+  s_18cf6ee2b24796::t_ebe34a30f7708f 1-36,39-40,42-81,86-87,89-91,94-343
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "2e149f545e940227dede0f33d3358f1c263f7e32",
+  "prompts": {},
+  "sessions": {
+    "s_18cf6ee2b24796": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4e994a1d-8cd6-4fb7-928c-47b6a6c674c5",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
