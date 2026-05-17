@@ -1,0 +1,26 @@
+web/rich.js
+  s_18cf6ee2b24796::t_8980e5be61039d 37-47
+  s_18cf6ee2b24796::t_07e79b42e1d043 220,223,230
+  s_18cf6ee2b24796::t_73694356e87dd3 281,290-292
+  s_18cf6ee2b24796::t_f59141c2d6dd0d 306-462
+  s_18cf6ee2b24796::t_ec8f7e46c9073e 518
+web/rich.html
+  s_18cf6ee2b24796::t_aa3105500ad508 170-203
+  s_18cf6ee2b24796::t_3a0c2b0c8b6a64 65-153
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "42cd942d86c5796d4ed444654e27ef7fab357b31",
+  "prompts": {},
+  "sessions": {
+    "s_18cf6ee2b24796": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4e994a1d-8cd6-4fb7-928c-47b6a6c674c5",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
