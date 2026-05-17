@@ -24,9 +24,14 @@ const COL_TEXT = 3;
 const COL_BLOB = 4;
 const COL_NULL = 5;
 
-export async function initWasm(locateWasm) {
+// `extraOpts` is forwarded to emscripten Module's options bag. Browsers
+// only need `locateFile`; Node test harnesses pass `wasmBinary` (an
+// ArrayBuffer/Uint8Array read off disk) which short-circuits emscripten's
+// fetch-the-wasm path that requires a URL, not a filesystem path.
+export async function initWasm(locateWasm, extraOpts = {}) {
   const mod = await Module({
     locateFile: (file) => locateWasm(file),
+    ...extraOpts,
   });
   return { open: (path) => openDb(mod, path) };
 }

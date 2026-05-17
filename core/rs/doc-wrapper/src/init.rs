@@ -40,8 +40,10 @@ fn setup(db: *mut sqlite3) -> Result<(), String> {
         .map_err(|_| String::from("crsql_as_crr('blocks')"))?;
 
     // 3. Promote body column to Peritext. This pulls in text-CRDT-fugue
-    //    + marks table + the no-fast-path opt-out.
-    db.exec_safe("SELECT crsql_as_peritext('blocks', 'body')")
+    //    + marks table + the no-fast-path opt-out. Declare `comment` as
+    //    additive (paper §3.2.2): overlapping comments coexist as separate
+    //    highlights rather than LWW-collapsing.
+    db.exec_safe("SELECT crsql_as_peritext('blocks', 'body', '[\"comment\"]')")
         .map_err(|_| String::from("crsql_as_peritext('blocks','body')"))?;
 
     // 4. Register the doc-level tree CRDT.
