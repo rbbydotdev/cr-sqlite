@@ -1,0 +1,21 @@
+web/build-unified.sh
+  s_18cf6ee2b24796::t_3c8cd849b36a77 1-50
+web/rich.js
+  s_18cf6ee2b24796::t_2fb86707eae303 3-5,8-10,16-19,21-23,25-30,37,39,41,45-48,50-52,54-55,58-59,62,64,68,70-71,73-75,77,80,84,86,90-98,108-109,114,116-118,121-141,144-145,148-157,159-171,212-213,215,222-223,228,232-234
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "7a27e6cee1664bd30a07f35ce38f97b2e6b33cfc",
+  "prompts": {},
+  "sessions": {
+    "s_18cf6ee2b24796": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4e994a1d-8cd6-4fb7-928c-47b6a6c674c5",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
