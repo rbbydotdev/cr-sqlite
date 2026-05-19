@@ -310,24 +310,53 @@ fn pair_blocks(new: &[NewBlock], current: &[CurrentBlock]) -> Pairing {
 }
 
 // ── fractional indices ──────────────────────────────────────────────
-// Tiny ASCII fractional-index helper. Returns a string lex-comparable
-// between `before` and `after`. We don't try to be optimal — for a demo,
-// "append a midpoint char" is fine.
+// ASCII fractional-index helper over the [a..z] alphabet. Returns a
+// string strictly between `before` and `after` under lex order.
+//
+// Walks byte-by-byte: while both inputs agree at position i (or have
+// no room for a midpoint there — e.g. adjacent bytes 'a','b'), commit
+// the byte from `before` (or 'a' if `before` ran out) and continue
+// deeper. At the first position with room (hi - lo >= 2 in byte space),
+// emit a single midpoint byte and return.
+//
+// Virtual bounds: `before = None` acts as the byte just below 'a';
+// `after = None` acts as the byte just above 'z'. So both-None gives
+// the midpoint 'm'; (Some(b), None) gives a midpoint between b and
+// past-end; etc.
+//
+// Critical case (regression fixed here): when `after` extends `before`
+// as a prefix (b="m", a="mm"), naively returning "b + m" collides with
+// a. The walk handles this by descending: same byte at i=0 → commit
+// 'm' → at i=1, b ended (virtual floor) vs a="m" → midpoint = 'f' →
+// return "mf", which is strictly between "m" and "mm".
 fn frac_between(before: Option<&str>, after: Option<&str>) -> String {
-    match (before, after) {
-        (None, None) => String::from("m"),
-        (Some(b), None) => format!("{}m", b),
-        (None, Some(a)) => {
-            // pick something < a; default "a" works if a > "a"
-            let first = a.as_bytes().first().copied().unwrap_or(b'm');
-            if first > b'a' { String::from("a") } else { format!("a{}", a) }
+    const A: u8 = b'a';
+    const Z: u8 = b'z';
+    let b = before.map(str::as_bytes).unwrap_or(&[]);
+    let a = after.map(str::as_bytes).unwrap_or(&[]);
+    let has_a = after.is_some();
+    let mut out: Vec<u8> = Vec::new();
+    let mut i = 0usize;
+    loop {
+        let lo: i32 = if i < b.len() { b[i] as i32 } else { A as i32 - 1 };
+        let hi: i32 = if has_a && i < a.len() { a[i] as i32 } else { Z as i32 + 1 };
+        if hi - lo >= 2 {
+            let mid = ((lo + hi) / 2) as u8;
+            // Clamp into [a..z]; the > 2-byte gap guarantees we stay strict.
+            let mid = mid.max(A).min(Z);
+            out.push(mid);
+            break;
         }
-        (Some(b), Some(a)) => {
-            // Pick char midway between b's first differing byte and a's.
-            // Cheap heuristic: concat b + 'm'.
-            if b < a { format!("{}m", b) } else { format!("{}m", b) }
+        // No room here: commit b's char (or 'a' if b ran out) and descend.
+        out.push(if i < b.len() { b[i] } else { A });
+        i += 1;
+        if i > 128 {
+            // pathological; punt with a midpoint suffix
+            out.push(b'm');
+            break;
         }
     }
+    String::from_utf8(out).unwrap_or_else(|_| String::from("m"))
 }
 
 // ── op emission ─────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ extern crate alloc;
 mod apply;
 mod init;
 mod render;
+mod sync;
 mod util;
 
 use core::ffi::{c_char, c_int};
@@ -38,6 +39,22 @@ pub extern "C" fn crsql_doc_render(
     render::doc_render(ctx, argc, argv);
 }
 
+pub extern "C" fn crsql_doc_pull(
+    ctx: *mut sqlite::context,
+    argc: i32,
+    argv: *mut *mut sqlite::value,
+) {
+    sync::doc_pull(ctx, argc, argv);
+}
+
+pub extern "C" fn crsql_doc_push(
+    ctx: *mut sqlite::context,
+    argc: i32,
+    argv: *mut *mut sqlite::value,
+) {
+    sync::doc_push(ctx, argc, argv);
+}
+
 #[no_mangle]
 pub extern "C" fn sqlite3_crsqldocwrapper_init(
     db: *mut sqlite::sqlite3,
@@ -59,6 +76,16 @@ pub extern "C" fn sqlite3_crsqldocwrapper_init(
     if let Err(rc) = db.create_function_v2(
         "crsql_doc_render", 0, sqlite::UTF8 | sqlite::DIRECTONLY,
         None, Some(crsql_doc_render), None, None, None,
+    ) { return rc as c_int; }
+
+    if let Err(rc) = db.create_function_v2(
+        "crsql_doc_pull", 1, sqlite::UTF8 | sqlite::DIRECTONLY,
+        None, Some(crsql_doc_pull), None, None, None,
+    ) { return rc as c_int; }
+
+    if let Err(rc) = db.create_function_v2(
+        "crsql_doc_push", 1, sqlite::UTF8 | sqlite::DIRECTONLY,
+        None, Some(crsql_doc_push), None, None, None,
     ) { return rc as c_int; }
 
     ResultCode::OK as c_int

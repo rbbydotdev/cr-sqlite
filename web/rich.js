@@ -29,6 +29,7 @@ import {
   toHtml,
 } from "./vendor/unified.esm.js";
 import { initWasm } from "./vendor/loader.js";
+import { reconcileMarkdown, mapOffset } from "./reconcile-markdown.js";
 
 const PEER_HUES = [200, 320, 90, 30, 260, 180, 350, 130];
 let sqlite = null;
@@ -140,11 +141,15 @@ function treeToMdast(tree) {
       const ordered = b.kind === "list-item-ord";
       if (!listBuf || listBuf.ordered !== ordered) {
         if (listBuf) children.push(listBuf);
-        listBuf = { type: "list", ordered, spread: false, children: [] };
+        // spread:true → toMarkdown renders blank lines between items,
+        // which is the demo's canonical syntactic style. Doesn't affect
+        // semEq (fingerprint ignores spread) so user-typed tight lists
+        // are still preserved verbatim.
+        listBuf = { type: "list", ordered, spread: true, children: [] };
       }
       listBuf.children.push({
         type: "listItem",
-        spread: false,
+        spread: true,
         children: [{ type: "paragraph", children: spansToMdast(b.spans) }],
       });
     } else {
@@ -183,6 +188,10 @@ function spanToMdast(s) {
 }
 
 // ── Peer ─────────────────────────────────────────────────────────────
+// One editor bound to one db. Treats its db like a plain document store:
+// `crsql_doc_apply` to write, `crsql_doc_render` to read. Knows nothing
+// about sync — the sync layer below moves opaque blobs between peers
+// via `crsql_doc_pull` / `crsql_doc_push`.
 
 class Peer {
   constructor({ db, label, hue, slot }) {
@@ -192,11 +201,12 @@ class Peer {
     this.el = null;
     this.editor = null;
     this.preview = null;
-    this.lastMarkdown = "";
-    // Canonical engine-rendered markdown, kept fresh by refreshFromEngine.
-    // Distinct from `lastMarkdown` (which mirrors the textarea) so the
-    // history scrubber can snapshot truth even while the textarea is
-    // showing a past state.
+    // The text the engine has applied. The reconciler runs only when
+    // this matches the textarea, so it never diffs against an engine
+    // that's a keystroke behind. Also the dedup baseline for input.
+    this.lastApplied = "";
+    // Canonical engine-rendered markdown, used for history snapshots
+    // and as the paint source when returning to live from scrubbing.
     this.engineMarkdown = "";
     this._applyChain = Promise.resolve();
   }
@@ -219,22 +229,20 @@ class Peer {
         .then(() => this._handleInput())
         .catch((e) => console.warn(`peer ${this.label} input failed:`, e));
     });
-    // Focus → context-only event in the history log. Doesn't change CRDT
-    // state but helps explain timing: "Peer A focused, then typed..."
     textarea.addEventListener("focus", () => {
       if (!scrubbing) captureEvent(this, "focus", "user clicked into editor");
     });
   }
 
   async _handleInput() {
-    if (scrubbing) return; // scrubber holds the editor read-only
+    if (scrubbing) return;
     const md = this.editor.value;
-    if (md === this.lastMarkdown) return;
-    const prevMd = this.lastMarkdown;
-    this.lastMarkdown = md;
+    if (md === this.lastApplied) return;
+    const prevMd = this.lastApplied;
     const mdast = fromMarkdown(md);
     const tree = mdastToTree(mdast);
     await this.db.exec("SELECT crsql_doc_apply(?)", [JSON.stringify(tree)]);
+    this.lastApplied = md;
     this._renderPreview(mdast);
     this._dumpState(tree);
     captureEvent(this, "input", describeDiff(prevMd, md));
@@ -243,21 +251,34 @@ class Peer {
   async refreshFromEngine() {
     const treeJson = (await this.db.execA("SELECT crsql_doc_render()"))[0]?.[0] ?? "[]";
     const tree = JSON.parse(treeJson);
-    const mdast = treeToMdast(tree);
-    const md = toMarkdown(mdast);
-    // Always track engine truth; it's used by the history scrubber.
-    this.engineMarkdown = md;
-    // While scrubbing the textarea + preview display a PAST snapshot.
-    // Don't clobber them with the engine's current state — that's the
-    // whole point of the scrubber. The engine keeps moving in the
-    // background; the user returns to it by clicking "live".
-    if (scrubbing) return;
-    if (md !== this.editor.value && document.activeElement !== this.editor) {
-      this.editor.value = md;
-      this.lastMarkdown = md;
-    }
-    this._renderPreview(mdast);
+    const engineMdast = treeToMdast(tree);
+    this.engineMarkdown = toMarkdown(engineMdast, { bullet: "-" });
+    this._renderPreview(engineMdast);
     this._dumpState(tree);
+    if (scrubbing) return;
+    // Skip when the engine hasn't yet applied what's in the textarea —
+    // otherwise the reconciler would treat the user's in-flight typing
+    // as a remote diff to undo. Next _handleInput catches up.
+    if (this.editor.value !== this.lastApplied) return;
+    const { text, preserved } = reconcileMarkdown(this.editor.value, engineMdast);
+    // Reconciled output IS what the engine reflects — track it so the
+    // guard above doesn't permanently lock out a receiving peer who
+    // never advances lastApplied via _handleInput.
+    if (text === this.editor.value) {
+      this.lastApplied = text;
+      return;
+    }
+    const wasFocused = document.activeElement === this.editor;
+    const selStart = wasFocused ? this.editor.selectionStart : null;
+    const selEnd   = wasFocused ? this.editor.selectionEnd   : null;
+    this.editor.value = text;
+    this.lastApplied = text;
+    if (wasFocused && selStart != null) {
+      const ns = mapOffset(preserved, selStart, text.length);
+      const ne = mapOffset(preserved, selEnd ?? selStart, text.length);
+      try { this.editor.setSelectionRange(ns, ne); } catch (_) {}
+      this.editor.focus();
+    }
   }
 
   _renderPreview(mdast) {
@@ -287,38 +308,23 @@ class Peer {
     if (lbl) lbl.textContent = this.online ? "online" : "offline";
   }
 
-  async pullChanges(excludeSiteHex) {
-    return await this.db.execA(
-      `SELECT "table","pk","cid","val","col_version","db_version",site_id,cl,seq
-       FROM crsql_changes WHERE site_id IS NOT ?`,
-      [hexToBytes(excludeSiteHex)],
-    );
-  }
-  async applyChanges(rows) {
-    if (!rows.length) return;
-    const prevMd = this.lastMarkdown;
-    for (const r of rows) {
-      await this.db.exec(
-        `INSERT INTO crsql_changes ("table","pk","cid","val","col_version","db_version",site_id,cl,seq)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        r,
-      );
-    }
-    await this.refreshFromEngine();
-    if (this.lastMarkdown !== prevMd) {
-      captureEvent(this, `sync (${rows.length})`, describeDiff(prevMd, this.lastMarkdown));
-    }
-  }
-
   destroy() { this.db.close().catch(() => {}); this.el?.remove(); }
 }
 
-function hexToBytes(hex) {
-  if (!hex) return null;
-  const clean = hex.replace(/^0x/i, "");
-  const out = new Uint8Array(clean.length / 2);
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.substr(i * 2, 2), 16);
-  return out;
+// ── sync glue ────────────────────────────────────────────────────────
+// Shuttle opaque change blobs from one peer's db to another's. The
+// engine's `crsql_doc_pull` / `crsql_doc_push` UDFs hide the underlying
+// `crsql_changes` schema entirely — this layer just moves the blob.
+
+async function syncPair(from, to) {
+  const blob = (await from.db.execA("SELECT crsql_doc_pull(?)", [to.siteId]))[0]?.[0];
+  if (!blob || blob === "[]") return;
+  const prevEngine = to.engineMarkdown;
+  await to.db.exec("SELECT crsql_doc_push(?)", [blob]);
+  await to.refreshFromEngine();
+  if (to.engineMarkdown !== prevEngine) {
+    captureEvent(to, "sync", describeDiff(prevEngine, to.engineMarkdown));
+  }
 }
 
 // ── history capture + scrubber ───────────────────────────────────────
@@ -492,16 +498,17 @@ async function goLive() {
   setScrubbing(false);
   playback.current = null;
   highlightRow(null);
-  // Force-paint textarea + preview from current engine state. Bypass the
-  // refreshFromEngine focus-check (the "live" button is an explicit user
-  // intent — don't preserve a stale focus state).
-  for (const p of world.peers) {
-    const md = p.engineMarkdown ?? "";
-    if (p.editor) { p.editor.value = md; p.lastMarkdown = md; }
-    if (p.preview) {
-      try { p.preview.innerHTML = toHtml(toHast(fromMarkdown(md))); }
-      catch (_) {}
-    }
+  // Force-paint from current engine state. Setting lastApplied keeps
+  // the next _handleInput's diff sane and the refreshFromEngine guard
+  // re-armed.
+  for (const p of world.peers) repaintFromEngine(p);
+}
+
+function repaintFromEngine(p) {
+  const md = p.engineMarkdown ?? "";
+  if (p.editor) { p.editor.value = md; p.lastApplied = md; }
+  if (p.preview) {
+    try { p.preview.innerHTML = toHtml(toHast(fromMarkdown(md))); } catch (_) {}
   }
 }
 
@@ -511,19 +518,12 @@ function clearHistory() {
   playback.current = null;
   if (historyTbody) historyTbody.innerHTML = "";
 
-  // Exit scrubbing so the new log starts from live state and the editor
-  // resumes engine-truth display. Otherwise the user could clear while
-  // viewing a past row and the first real event after clear would be
-  // captured against a stale `engineMarkdown`-vs-textarea mix.
+  // Exit scrubbing so the new log starts from live state. Without this
+  // the first real event after clear could be captured against a stale
+  // engineMarkdown-vs-textarea mix.
   if (scrubbing) {
     setScrubbing(false);
-    for (const p of world.peers) {
-      const md = p.engineMarkdown ?? "";
-      if (p.editor) { p.editor.value = md; p.lastMarkdown = md; }
-      if (p.preview) {
-        try { p.preview.innerHTML = toHtml(toHast(fromMarkdown(md))); } catch (_) {}
-      }
-    }
+    for (const p of world.peers) repaintFromEngine(p);
   }
 
   // Seed the fresh log with one baseline row per peer capturing their
@@ -637,10 +637,8 @@ async function syncTick() {
   for (const a of online) {
     for (const b of online) {
       if (a === b) continue;
-      try {
-        const changes = await a.pullChanges(b.siteId);
-        if (changes.length) await b.applyChanges(changes);
-      } catch (e) { console.warn(`sync ${a.label}→${b.label} failed:`, e); }
+      try { await syncPair(a, b); }
+      catch (e) { console.warn(`sync ${a.label}→${b.label} failed:`, e); }
     }
   }
 }
