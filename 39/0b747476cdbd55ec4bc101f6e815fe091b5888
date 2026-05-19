@@ -1,0 +1,38 @@
+web/ot.js
+  s_18cf6ee2b24796::t_735867c1d6e17a 99-101,117-118,124,128,137-146
+  s_18cf6ee2b24796::t_2b40d9457e4590 163-184
+  s_18cf6ee2b24796::t_782090da292f10 231-235,238-251
+  s_18cf6ee2b24796::t_87b5dc23800409 1-98,102-116,119-123,125-127,129-136,147-162,185-230,236-237,252-288
+core/rs/doc-wrapper/src/ot.rs
+  s_18cf6ee2b24796::t_202d3abcbb6474 312
+  s_18cf6ee2b24796::t_2c3f6b41c24d71 321-368
+  s_18cf6ee2b24796::t_becd07e0b3e59c 1-311,313-320,369-375,377-530
+  s_18cf6ee2b24796::t_5a52e55ec956d8 376
+tests/smoke/doc-wrapper-ot.mjs
+  s_18cf6ee2b24796::t_9a379310ab22df 191-211
+  s_18cf6ee2b24796::t_81c6e1cb4b8fbb 1-190,212
+core/rs/doc-wrapper/src/lib.rs
+  s_18cf6ee2b24796::t_1d5926261ccfba 59-65
+  s_18cf6ee2b24796::t_df2fadc44c29c2 66
+  s_18cf6ee2b24796::t_56354b07d74aea 107
+  s_18cf6ee2b24796::t_fe3b1059d372df 9
+  s_18cf6ee2b24796::t_e3525db5ab2c97 100-106
+web/ot.html
+  s_18cf6ee2b24796::t_d03f99425e07c7 1-97
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.10",
+  "base_commit_sha": "390b747476cdbd55ec4bc101f6e815fe091b5888",
+  "prompts": {},
+  "sessions": {
+    "s_18cf6ee2b24796": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4e994a1d-8cd6-4fb7-928c-47b6a6c674c5",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
