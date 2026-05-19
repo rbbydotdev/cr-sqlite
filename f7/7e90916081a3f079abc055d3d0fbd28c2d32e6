@@ -1,0 +1,55 @@
+core/rs/doc-wrapper/src/lib.rs
+  s_18cf6ee2b24796::t_1aa182af0ff4e7 42-57
+  s_18cf6ee2b24796::t_4b6f8291d0f424 10
+  s_18cf6ee2b24796::t_37074f04b8353f 81-90
+web/reconcile-markdown.js
+  s_18cf6ee2b24796::t_104cf2bedeeb48 1-13,22-26,30-32,34-37,52,69-77,79,81-86,88-90,124-136,138-140,161-165,176-182,185-209,221-229,231-247
+  s_18cf6ee2b24796::t_6fdd0e0d2a8b86 29,38-51,53-64,68,78,91-123
+  s_18cf6ee2b24796::t_719b23e095161e 174-175
+  s_18cf6ee2b24796::t_578f2b69565563 230
+  s_18cf6ee2b24796::t_b17b435ff479b7 248-258
+  s_18cf6ee2b24796::t_45e319c375e0f0 14-21,27-28,33,65-67,80,87,137,141-160,166-173,183-184,210-220
+.gitignore
+  s_18cf6ee2b24796::t_c8e5168152622a 17
+tests/smoke/doc-wrapper-insert-between.mjs
+  s_18cf6ee2b24796::t_65495c311773ec 1-133
+core/rs/doc-wrapper/src/apply.rs
+  s_18cf6ee2b24796::t_e45d4e854d68e3 313-331,333-348,350-356,359
+core/rs/doc-wrapper/src/sync.rs
+  s_18cf6ee2b24796::t_262c9bfafbcd99 18
+  s_18cf6ee2b24796::t_391a6817e5bb85 1-17,19-107
+web/rich.js
+  s_18cf6ee2b24796::t_413de2d4ea654f 144-148,152
+  s_18cf6ee2b24796::t_83f981277fa066 193-194
+  s_18cf6ee2b24796::t_20a6f59c5605ca 207
+  s_18cf6ee2b24796::t_2bcb1e9c3e9581 254,256-257,263,267,269-274,276-280
+  s_18cf6ee2b24796::t_94d837c86b0d5e 255
+  s_18cf6ee2b24796::t_281baac5ce089f 315-321,323,326
+  s_18cf6ee2b24796::t_25bbe6148631c8 501-511
+  s_18cf6ee2b24796::t_9632b3e7ddf880 191-192,204-206,208-209,238,240-241,259-261,264-266,314,322,324-325
+  s_18cf6ee2b24796::t_03b52504a03ab3 262
+  s_18cf6ee2b24796::t_6710e8de6c0ca9 640-641
+  s_18cf6ee2b24796::t_358fd49ce7d322 268,275
+  s_18cf6ee2b24796::t_a01607ca282c38 521-523,526
+  s_18cf6ee2b24796::t_89e0125d94f6d2 32
+  s_18cf6ee2b24796::t_664417ffeee2a3 245
+tests/smoke/doc-wrapper-pull-push.mjs
+  s_18cf6ee2b24796::t_e6e7c9858f6f9b 1-30,33-34,38-128
+  s_18cf6ee2b24796::t_e1970cc8f233fe 31-32,35-37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.10",
+  "base_commit_sha": "f77e90916081a3f079abc055d3d0fbd28c2d32e6",
+  "prompts": {},
+  "sessions": {
+    "s_18cf6ee2b24796": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4e994a1d-8cd6-4fb7-928c-47b6a6c674c5",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "robby <robby.polana+github@gmail.com>"
+    }
+  }
+}
